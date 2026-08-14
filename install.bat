@@ -54,7 +54,7 @@ echo.
 echo =========================================================
 echo [SUCCESS] Roblox Studio MCP Fix has been installed!
 echo.
-echo You can now connect your MCP clients (Antigravity, Claude Code, etc.)
+echo You can now connect your MCP clients (Antigravity, Claude Code, Cursor, OpenCode, etc.)
 echo without any "server/discover" or "mcp.bat" errors.
 echo =========================================================
 echo.

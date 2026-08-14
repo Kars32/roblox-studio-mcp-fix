@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/Python-3.8+-yellow.svg)](https://www.python.org/)
 [![Roblox Studio](https://img.shields.io/badge/Roblox%20Studio-MCP%20Enabled-red.svg)](https://create.roblox.com/)
 
-A lightweight Python bridge for Roblox Studio's Model Context Protocol (MCP) server. Fixes startup crashes and handshake errors when connecting modern MCP clients like Antigravity, Claude Code, and Cursor to Roblox Studio on Windows.
+A lightweight Python bridge for Roblox Studio's Model Context Protocol (MCP) server. Fixes startup crashes and handshake errors when connecting modern MCP clients like Antigravity, Claude Code, Cursor, and OpenCode to Roblox Studio on Windows.
 
 ---
 
@@ -73,7 +73,7 @@ If you prefer to install manually:
 ## How It Works
 
 ```
-MCP Host (Antigravity / Claude Code / Cursor)
+MCP Host (Antigravity / Claude Code / Cursor / OpenCode)
        │
        │  JSON-RPC over stdio (server/discover, initialize, tools/*)
        ▼
