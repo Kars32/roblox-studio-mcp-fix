@@ -1,52 +1,59 @@
-# 🛠️ Roblox Studio MCP Compatibility Fix
+# Roblox Studio MCP Compatibility Bridge
 
-A lightweight, zero-dependency compatibility bridge for **Roblox Studio Model Context Protocol (MCP)** that fixes protocol discovery crashes and Windows batch script syntax errors in modern MCP clients (**Antigravity**, **Claude Code**, **Cursor**, etc.).
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)](https://www.microsoft.com/windows)
+[![Python](https://img.shields.io/badge/Python-3.8+-yellow.svg)](https://www.python.org/)
+[![Roblox Studio](https://img.shields.io/badge/Roblox%20Studio-MCP%20Enabled-red.svg)](https://create.roblox.com/)
+
+A lightweight Python bridge for Roblox Studio's Model Context Protocol (MCP) server. Fixes startup crashes and handshake errors when connecting modern MCP clients like Antigravity, Claude Code, and Cursor to Roblox Studio on Windows.
 
 ---
 
-## 🛑 The Problems It Solves
+## The Issues
 
-### 1. The `server/discover` Protocol Panic
+When connecting MCP clients to Roblox Studio, two common errors prevent the connection from establishing:
+
+### 1. `server/discover` Handshake Panic
 ```
 Error: expect initialized request, but received: Some(Request(JsonRpcRequest { jsonrpc: JsonRpcVersion2_0, id: Number(1), request: CustomRequest(CustomRequest { method: "server/discover" ... }) }))
 : connection closed: calling "initialize": client is closing: EOF
 ```
-* **Why it happens:** Modern MCP hosts send a lightweight `server/discover` probe upon startup to discover available tools. Roblox's Rust-based `StudioMCP.exe` strictly enforces the legacy stateful handshake (`initialize` must be request #1) and crashes when receiving discovery requests.
+Modern MCP hosts send a lightweight `server/discover` probe on startup to scan available tools. Roblox's built-in `StudioMCP.exe` strictly enforces the older stateful initialization sequence (`initialize` must be the first request) and immediately aborts the connection upon receiving a discovery probe.
 
-### 2. The `mcp.bat` Windows Batch Syntax Error
+### 2. Windows Batch Syntax Bug in `mcp.bat`
 ```
 'else' is not recognized as an internal or external command, operable program or batch file.
 '"%B/..\StudioMCP.exe"' is not recognized as an internal or external command...
 '))' is not recognized as an internal or external command...
 ```
-* **Why it happens:** Roblox's default `%LOCALAPPDATA%\Roblox\mcp.bat` has an `if (...)` statement with `else` placed on a new line, which is invalid syntax in Windows `cmd.exe`.
+Roblox's generated `%LOCALAPPDATA%\Roblox\mcp.bat` places the `else` keyword on a separate line after `if (...)`, which is invalid syntax in Windows Command Prompt (`cmd.exe`).
 
-### 3. Automatic Active Studio Detection
-* Roblox's `StudioMCP.exe` requires clients to manually call `list_roblox_studios` and `set_active_studio` before executing tools. This bridge automatically resolves and binds your active open Studio place on the fly.
+### 3. Active Studio Session Binding
+`StudioMCP.exe` requires clients to query `list_roblox_studios` and call `set_active_studio` before tool execution works. This bridge automatically resolves and binds the active Studio session when running commands.
 
 ---
 
-## ⚡ Quick Start (1-Click Install)
+## Quick Install (Automatic)
 
 1. Clone or download this repository.
-2. Double-click **`install.bat`**.
+2. Run `install.bat`.
+   * Backs up your existing `mcp.bat` to `mcp.bat.backup`.
+   * Copies `studio_mcp_bridge.py` and the updated `mcp.bat` to `%LOCALAPPDATA%\Roblox\`.
 3. Restart your MCP client / IDE.
-
-That's it! Your MCP client will now connect to Roblox Studio seamlessly.
 
 ---
 
-## 🔧 Manual Installation
+## Manual Installation
 
 If you prefer to install manually:
 
-1. Copy [`studio_mcp_bridge.py`](studio_mcp_bridge.py) into `%LOCALAPPDATA%\Roblox\`.
+1. Copy `studio_mcp_bridge.py` into `%LOCALAPPDATA%\Roblox\`.
 2. Replace `%LOCALAPPDATA%\Roblox\mcp.bat` with:
    ```bat
    @echo off
    python "%LOCALAPPDATA%\Roblox\studio_mcp_bridge.py" %*
    ```
-3. Configure your client's MCP configuration (`mcp_config.json`):
+3. Add the server to your client's MCP configuration (`mcp_config.json`):
    ```json
    {
      "mcpServers": {
@@ -63,40 +70,42 @@ If you prefer to install manually:
 
 ---
 
-## 🏗️ Architecture
+## How It Works
 
 ```
 MCP Host (Antigravity / Claude Code / Cursor)
        │
-       │  Sends JSON-RPC over stdio (supports server/discover & initialize)
+       │  JSON-RPC over stdio (server/discover, initialize, tools/*)
        ▼
 [ studio_mcp_bridge.py ]
        ├── Handles initial handshake with StudioMCP.exe
-       ├── Answers host discovery probes with full tool catalog
-       ├── Auto-binds the active Roblox Studio instance ID
+       ├── Responds to host discovery probes with tool catalog
+       ├── Auto-binds active Roblox Studio instance ID
        ▼
-StudioMCP.exe (Roblox Official Binary)
-       │  Local WebSocket IPC (port ~44933)
-       ▼
-Roblox Studio (Active Place / Live Session)
+StudioMCP.exe (Roblox Server) ─── Local WebSocket ───► Roblox Studio
 ```
 
----
-
-## 📦 Requirements
-
-* **OS:** Windows 10 / 11
-* **Python:** 3.8+ (Included standard with Python on PATH)
-* **Roblox Studio:** Studio with Model Context Protocol enabled
+The bridge intercepts incoming requests on `stdin`:
+* When the host sends `server/discover`, the bridge queries `tools/list` from `StudioMCP.exe` and formats the discovery response.
+* When the host sends `initialize`, the bridge returns the cached capability response.
+* When tools like `execute_luau` or `get_studio_state` are called, the bridge ensures the active Studio instance is bound, forwards the request, and pipes the output back to stdout.
 
 ---
 
-## 🗑️ Uninstallation
+## Requirements
 
-Run **`uninstall.bat`** to restore your original Roblox Studio `mcp.bat` and remove the bridge script.
+* Windows 10 or 11
+* Python 3.8+ on PATH
+* Roblox Studio with Model Context Protocol enabled
 
 ---
 
-## 📄 License
+## Uninstallation
 
-MIT License © 2026
+Run `uninstall.bat` to delete `studio_mcp_bridge.py` and restore your original `mcp.bat` from backup.
+
+---
+
+## License
+
+MIT
