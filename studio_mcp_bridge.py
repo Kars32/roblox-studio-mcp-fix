@@ -1,6 +1,6 @@
 """
-Roblox Studio MCP Compatibility Bridge
-Translates modern MCP discovery protocols (server/discover) to legacy StudioMCP.exe initialization.
+Roblox Studio MCP Compatibility Bridge (v1.1.0)
+Fixes stdio deadlocks, handles discovery probes, and auto-binds active Studio sessions.
 """
 
 import sys
@@ -17,7 +17,7 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
-# Dynamically locate StudioMCP.exe in Roblox Versions
+# Locate StudioMCP.exe dynamically
 studio_mcp_path = None
 versions_dir = os.path.expandvars(r"%LOCALAPPDATA%\Roblox\Versions")
 if os.path.exists(versions_dir):
@@ -27,15 +27,15 @@ if os.path.exists(versions_dir):
             break
 
 if not studio_mcp_path:
-    # Fallback to direct registry / Program Files check
     sys.stderr.write("Error: Could not locate StudioMCP.exe in %LOCALAPPDATA%\\Roblox\\Versions\n")
     sys.exit(1)
 
+# Pass stderr to DEVNULL to avoid Windows OS pipe buffer deadlock
 proc = subprocess.Popen(
     [studio_mcp_path],
     stdin=subprocess.PIPE,
     stdout=subprocess.PIPE,
-    stderr=subprocess.PIPE,
+    stderr=subprocess.DEVNULL,
     text=True,
     encoding="utf-8",
     bufsize=1
@@ -67,14 +67,14 @@ send_to_proc({
     "params": {
         "protocolVersion": "2024-11-05",
         "capabilities": {"tools": {"listChanged": True}},
-        "clientInfo": {"name": "antigravity_bridge", "version": "1.0.0"}
+        "clientInfo": {"name": "antigravity_bridge", "version": "1.1.0"}
     }
 })
 init_res = read_from_proc()
 send_to_proc({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
 def call_proc_tool(name, args, call_id):
-    for attempt in range(15):
+    for attempt in range(5):
         send_to_proc({
             "jsonrpc": "2.0",
             "id": call_id,
@@ -86,10 +86,10 @@ def call_proc_tool(name, args, call_id):
             content = res["result"].get("content", [])
             is_error = res["result"].get("isError", False)
             if is_error and len(content) > 0 and "Not connected" in content[0].get("text", ""):
-                time.sleep(0.5)
+                time.sleep(0.3)
                 continue
             return res
-        time.sleep(0.3)
+        time.sleep(0.2)
     return None
 
 active_studio_set = False
@@ -99,19 +99,17 @@ def ensure_active_studio():
     if active_studio_set:
         return True
     try:
-        for poll in range(15):
-            res = call_proc_tool("list_roblox_studios", {}, 200 + poll)
-            if res and "result" in res:
-                txt = res["result"].get("content", [{}])[0].get("text", "{}")
-                data = json.loads(txt)
-                studios = data.get("studios", [])
-                if studios and studios[0].get("id") and (studios[0].get("name") is not None or poll >= 5):
-                    sid = studios[0]["id"]
-                    set_res = call_proc_tool("set_active_studio", {"studio_id": sid}, 299)
-                    if set_res and not set_res.get("result", {}).get("isError", False):
-                        active_studio_set = True
-                        return True
-            time.sleep(0.6)
+        res = call_proc_tool("list_roblox_studios", {}, 900)
+        if res and "result" in res:
+            txt = res["result"].get("content", [{}])[0].get("text", "{}")
+            data = json.loads(txt)
+            studios = data.get("studios", [])
+            if studios and studios[0].get("id"):
+                sid = studios[0]["id"]
+                set_res = call_proc_tool("set_active_studio", {"studio_id": sid}, 901)
+                if set_res and not set_res.get("result", {}).get("isError", False):
+                    active_studio_set = True
+                    return True
     except Exception:
         pass
     return False
@@ -137,7 +135,7 @@ while True:
                 "result": init_res.get("result", {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {"listChanged": True}},
-                    "serverInfo": {"name": "RobloxStudio", "version": "1.0.0"},
+                    "serverInfo": {"name": "RobloxStudio", "version": "1.1.0"},
                     "instructions": "Studio MCP Bridge"
                 })
             }
@@ -161,7 +159,7 @@ while True:
                 "id": req_id,
                 "result": {
                     "tools": tools_list,
-                    "serverInfo": {"name": "RobloxStudio", "version": "1.0.0"}
+                    "serverInfo": {"name": "RobloxStudio", "version": "1.1.0"}
                 }
             }
             sys.stdout.write(json.dumps(resp) + "\n")
@@ -175,7 +173,11 @@ while True:
                 sys.stdout.flush()
 
         elif method == "tools/call":
-            ensure_active_studio()
+            params = req.get("params", {})
+            tool_name = params.get("name")
+            # Only auto-bind studio if calling actions other than list/set
+            if tool_name not in ["list_roblox_studios", "set_active_studio"]:
+                ensure_active_studio()
             send_to_proc(req)
             resp = read_from_proc()
             if resp:
@@ -194,7 +196,6 @@ while True:
                 sys.stdout.flush()
 
     except Exception as e:
-        sys.stderr.write(f"Bridge error: {e}\n")
-        sys.stderr.flush()
+        pass
 
 proc.terminate()
