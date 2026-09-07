@@ -27,8 +27,13 @@ if %ERRORLEVEL% neq 0 (
 echo [1/3] Backing up original mcp.bat...
 if exist "%TARGET_DIR%\mcp.bat" (
     if not exist "%TARGET_DIR%\mcp.bat.backup" (
-        copy /y "%TARGET_DIR%\mcp.bat" "%TARGET_DIR%\mcp.bat.backup" >nul
-        echo     Created backup at %TARGET_DIR%\mcp.bat.backup
+        findstr /i "studio_mcp_bridge.py" "%TARGET_DIR%\mcp.bat" >nul 2>&1
+        if !ERRORLEVEL! neq 0 (
+            copy /y "%TARGET_DIR%\mcp.bat" "%TARGET_DIR%\mcp.bat.backup" >nul
+            echo     Created backup at %TARGET_DIR%\mcp.bat.backup
+        ) else (
+            echo     Current mcp.bat is already the bridge script; skipping backup.
+        )
     ) else (
         echo     Existing backup found at %TARGET_DIR%\mcp.bat.backup
     )
