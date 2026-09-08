@@ -170,6 +170,65 @@ class TestStudioMCPBridge(unittest.TestCase):
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
 
+    def test_read_response_for_id_forwards_notifications(self):
+        bridge = StudioMCPBridge()
+        notifications = [
+            {"jsonrpc": "2.0", "method": "notifications/message", "params": {"text": "hello"}},
+            {"jsonrpc": "2.0", "id": "req_101", "result": {"success": True}}
+        ]
+        with patch.object(bridge, "read_from_proc", side_effect=notifications):
+            captured_stdout = io.StringIO()
+            with patch("sys.stdout", captured_stdout):
+                resp = bridge.read_response_for_id("req_101", timeout=1.0)
+                self.assertEqual(resp, {"jsonrpc": "2.0", "id": "req_101", "result": {"success": True}})
+                written = captured_stdout.getvalue()
+                self.assertIn("notifications/message", written)
+
+    def test_ensure_active_studio_with_integer_zero_id(self):
+        bridge = StudioMCPBridge()
+        mock_responses = [
+            # Response to list_roblox_studios with integer 0 ID
+            {
+                "jsonrpc": "2.0",
+                "id": "__bridge_tool_list_0",
+                "result": {
+                    "content": [{"type": "text", "text": json.dumps({"studios": [{"id": 0}]})}]
+                }
+            },
+            # Response to set_active_studio
+            {
+                "jsonrpc": "2.0",
+                "id": "__bridge_tool_set_0",
+                "result": {
+                    "content": [{"type": "text", "text": "Active studio set"}],
+                    "isError": False
+                }
+            }
+        ]
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_response_for_id", side_effect=mock_responses):
+            success = bridge.ensure_active_studio()
+            self.assertTrue(success)
+            self.assertTrue(bridge.active_studio_set)
+
+    def test_handle_message_malformed_rpc_result(self):
+        bridge = StudioMCPBridge()
+        # Non-dict result field or None
+        malformed_resp = {"jsonrpc": "2.0", "id": 1, "result": None}
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_response_for_id", return_value=malformed_resp):
+            req = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "test"}}
+            resp = bridge.handle_message(req)
+            self.assertEqual(resp, malformed_resp)
+
+    def test_start_process_os_error_handling(self):
+        bridge = StudioMCPBridge(studio_mcp_path="/invalid/path/StudioMCP.exe")
+        with patch("subprocess.Popen", side_effect=OSError("File not found")), \
+             patch("sys.stderr.write") as mock_err, \
+             self.assertRaises(SystemExit):
+            bridge.start_process()
+        mock_err.assert_called()
+
 
 if __name__ == "__main__":
     unittest.main()
