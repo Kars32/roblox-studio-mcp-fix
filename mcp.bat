@@ -1,2 +1,2 @@
 @echo off
-python "%LOCALAPPDATA%\Roblox\studio_mcp_bridge.py" %*
+python "%~dp0studio_mcp_bridge.py" %*
