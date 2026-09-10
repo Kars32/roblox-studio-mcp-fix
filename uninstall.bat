@@ -19,6 +19,7 @@ if exist "%TARGET_DIR%\mcp.bat.backup" (
     echo Restored original mcp.bat from backup
 ) else (
     echo [NOTICE] Backup file mcp.bat.backup not found. Left existing mcp.bat in place.
+    echo [NOTICE] If Roblox Studio fails to start MCP, please reinstall Roblox Studio or re-run install.bat.
 )
 
 echo.

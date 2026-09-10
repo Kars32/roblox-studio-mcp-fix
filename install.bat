@@ -15,13 +15,20 @@ if not exist "%TARGET_DIR%" (
     exit /b 1
 )
 
-:: Check for Python
+:: Check for Python or Python Launcher (py)
 where python >nul 2>nul
-if %ERRORLEVEL% neq 0 (
-    echo [ERROR] Python was not found in your PATH.
-    echo Please install Python 3.8+ and check "Add Python to PATH".
-    pause
-    exit /b 1
+if %ERRORLEVEL% equ 0 (
+    set "PYTHON_CMD=python"
+) else (
+    where py >nul 2>nul
+    if !ERRORLEVEL! equ 0 (
+        set "PYTHON_CMD=py"
+    ) else (
+        echo [ERROR] Python was not found in your PATH.
+        echo Please install Python 3.8+ and check "Add Python to PATH".
+        pause
+        exit /b 1
+    )
 )
 
 echo [1/3] Backing up original mcp.bat...
