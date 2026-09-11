@@ -9,6 +9,8 @@ import subprocess
 import json
 import os
 import time
+import threading
+import queue
 
 
 def reconfigure_io():
@@ -30,17 +32,31 @@ def find_studio_mcp_path():
     if env_path and os.path.isfile(env_path):
         return env_path
 
-    versions_dir = os.path.expandvars(r"%LOCALAPPDATA%\Roblox\Versions")
+    possible_dirs = []
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        possible_dirs.append(os.path.join(local_app_data, "Roblox", "Versions"))
+
+    user_profile = os.environ.get("USERPROFILE")
+    if user_profile:
+        possible_dirs.append(os.path.join(user_profile, "AppData", "Local", "Roblox", "Versions"))
+
+    expanded_path = os.path.expandvars(r"%LOCALAPPDATA%\Roblox\Versions")
+    if expanded_path not in possible_dirs:
+        possible_dirs.append(expanded_path)
+
     candidates = []
-    if os.path.exists(versions_dir):
-        for root, _, files in os.walk(versions_dir):
-            if "StudioMCP.exe" in files:
-                full_path = os.path.join(root, "StudioMCP.exe")
-                try:
-                    mtime = os.path.getmtime(full_path)
-                    candidates.append((mtime, full_path))
-                except OSError:
-                    candidates.append((0, full_path))
+    for versions_dir in possible_dirs:
+        if os.path.exists(versions_dir):
+            for root, _, files in os.walk(versions_dir):
+                for f in files:
+                    if f.lower() == "studiomcp.exe":
+                        full_path = os.path.join(root, f)
+                        try:
+                            mtime = os.path.getmtime(full_path)
+                            candidates.append((mtime, full_path))
+                        except OSError:
+                            candidates.append((0, full_path))
 
     if candidates:
         candidates.sort(key=lambda x: x[0], reverse=True)
@@ -55,6 +71,49 @@ class StudioMCPBridge:
         self.proc = proc
         self.active_studio_set = False
         self.init_res = None
+        self.msg_queue = queue.Queue()
+        self.reader_thread = None
+        self._stop_reader = False
+
+        if self.proc is not None and getattr(self.proc, "stdout", None) is not None:
+            self._start_reader_thread()
+
+    def _start_reader_thread(self):
+        self._stop_reader = False
+        self.reader_thread = threading.Thread(target=self._read_loop, daemon=True)
+        self.reader_thread.start()
+
+    def _read_loop(self):
+        while not self._stop_reader and self.proc and self.proc.stdout and self.proc.poll() is None:
+            try:
+                line = self.proc.stdout.readline()
+                if not line or not isinstance(line, str):
+                    break
+                line_str = line.strip()
+                if not line_str:
+                    continue
+                try:
+                    data = json.loads(line_str)
+                    self.msg_queue.put(data)
+                except Exception:
+                    pass
+            except Exception:
+                break
+        self.msg_queue.put(None)
+
+    def is_process_alive(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def ensure_process_running(self):
+        if not self.is_process_alive():
+            if self.studio_mcp_path or os.environ.get("STUDIO_MCP_PATH") or find_studio_mcp_path():
+                self.close()
+                self.start_process()
+                self.init_proc()
+                self.active_studio_set = False
+                return True
+            return False
+        return True
 
     def start_process(self):
         if not self.studio_mcp_path:
@@ -73,8 +132,11 @@ class StudioMCPBridge:
             encoding="utf-8",
             bufsize=1
         )
+        self.msg_queue = queue.Queue()
+        self._start_reader_thread()
 
     def send_to_proc(self, msg):
+        self.ensure_process_running()
         if not self.proc or not self.proc.stdin or self.proc.poll() is not None:
             return False
         payload = json.dumps(msg) + "\n"
@@ -85,7 +147,33 @@ class StudioMCPBridge:
         except (BrokenPipeError, OSError, ValueError):
             return False
 
-    def read_from_proc(self):
+    def read_from_proc(self, target_id=None, timeout=5.0):
+        if self.reader_thread and self.reader_thread.is_alive():
+            start_time = time.time()
+            while True:
+                remaining = timeout - (time.time() - start_time) if timeout is not None else None
+                if remaining is not None and remaining <= 0:
+                    return None
+                try:
+                    msg = self.msg_queue.get(timeout=remaining if remaining is not None else 0.1)
+                except queue.Empty:
+                    return None
+
+                if msg is None:
+                    return None
+
+                if isinstance(msg, dict):
+                    if "id" not in msg or msg["id"] is None:
+                        sys.stdout.write(json.dumps(msg) + "\n")
+                        sys.stdout.flush()
+                        continue
+
+                    if target_id is None or msg.get("id") == target_id:
+                        return msg
+                    continue
+            return None
+
+        # Fallback for environments without an active reader thread (e.g. mocked proc in unit tests)
         if not self.proc or not self.proc.stdout or self.proc.poll() is not None:
             return None
         while True:
@@ -93,13 +181,21 @@ class StudioMCPBridge:
                 line = self.proc.stdout.readline()
             except (OSError, ValueError):
                 return None
-            if not line:
+            if not line or not isinstance(line, str):
                 return None
             line_str = line.strip()
             if not line_str:
                 continue
             try:
-                return json.loads(line_str)
+                msg = json.loads(line_str)
+                if isinstance(msg, dict):
+                    if ("id" not in msg or msg["id"] is None) and target_id is not None:
+                        sys.stdout.write(json.dumps(msg) + "\n")
+                        sys.stdout.flush()
+                        continue
+                    if target_id is None or msg.get("id") == target_id:
+                        return msg
+                    continue
             except Exception:
                 pass
 
@@ -115,7 +211,7 @@ class StudioMCPBridge:
             }
         }):
             return None
-        self.init_res = self.read_from_proc()
+        self.init_res = self.read_from_proc(target_id="__bridge_init__")
         self.send_to_proc({"jsonrpc": "2.0", "method": "notifications/initialized"})
         return self.init_res
 
@@ -129,13 +225,13 @@ class StudioMCPBridge:
                 "params": {"name": name, "arguments": args}
             }):
                 return None
-            res = self.read_from_proc()
+            res = self.read_from_proc(target_id=req_id)
             if res and isinstance(res, dict) and res.get("id") == req_id:
                 if "result" in res:
                     content = res["result"].get("content", [])
                     is_error = res["result"].get("isError", False)
                     if is_error and isinstance(content, list) and len(content) > 0:
-                        err_text = content[0].get("text", "")
+                        err_text = content[0].get("text", "") if isinstance(content[0], dict) else ""
                         if "Not connected" in err_text or "No active studio" in err_text:
                             self.active_studio_set = False
                             time.sleep(0.3)
@@ -149,17 +245,30 @@ class StudioMCPBridge:
             return True
         try:
             res = self.call_proc_tool("list_roblox_studios", {}, "list")
-            if res and "result" in res:
+            if res and isinstance(res, dict) and "result" in res:
                 content = res["result"].get("content", [])
-                if content and isinstance(content, list) and len(content) > 0:
-                    txt = content[0].get("text", "{}")
-                    data = json.loads(txt)
-                    studios = data.get("studios", [])
+                if isinstance(content, list) and len(content) > 0:
+                    first_item = content[0]
+                    txt = first_item.get("text", "{}") if isinstance(first_item, dict) else "{}"
+                    data = json.loads(txt) if isinstance(txt, str) else txt
+
+                    studios = []
+                    if isinstance(data, dict):
+                        studios = data.get("studios", [])
+                    elif isinstance(data, list):
+                        studios = data
+
                     if studios and isinstance(studios, list) and len(studios) > 0:
-                        sid = studios[0].get("id")
-                        if sid:
+                        first_studio = studios[0]
+                        sid = None
+                        if isinstance(first_studio, dict):
+                            sid = first_studio.get("id") or first_studio.get("studio_id") or first_studio.get("studioId")
+                        elif isinstance(first_studio, (str, int)):
+                            sid = first_studio
+
+                        if sid is not None:
                             set_res = self.call_proc_tool("set_active_studio", {"studio_id": sid}, "set")
-                            if set_res and not set_res.get("result", {}).get("isError", False):
+                            if set_res and isinstance(set_res, dict) and not set_res.get("result", {}).get("isError", False):
                                 self.active_studio_set = True
                                 return True
         except Exception:
@@ -175,7 +284,6 @@ class StudioMCPBridge:
         has_id = ("id" in req and req_id is not None)
 
         if not has_id:
-            # Notifications expect no response and should not wait on subprocess
             if method != "notifications/initialized":
                 self.send_to_proc(req)
             return None
@@ -203,7 +311,7 @@ class StudioMCPBridge:
                 "method": "tools/list",
                 "params": {}
             }):
-                list_res = self.read_from_proc()
+                list_res = self.read_from_proc(target_id="list_discover")
                 tools_list = list_res.get("result", {}).get("tools", []) if (list_res and isinstance(list_res, dict)) else []
                 return {
                     "jsonrpc": "2.0",
@@ -226,7 +334,7 @@ class StudioMCPBridge:
                     "id": req_id,
                     "error": {"code": -32603, "message": "Failed to query StudioMCP process"}
                 }
-            resp = self.read_from_proc()
+            resp = self.read_from_proc(target_id=req_id)
             if resp is None:
                 return {
                     "jsonrpc": "2.0",
@@ -238,7 +346,6 @@ class StudioMCPBridge:
         elif method == "tools/call":
             params = req.get("params", {}) if isinstance(req.get("params"), dict) else {}
             tool_name = params.get("name") if isinstance(params, dict) else None
-            # Auto-bind active studio for actions other than list/set
             if tool_name not in ["list_roblox_studios", "set_active_studio"]:
                 self.ensure_active_studio()
 
@@ -248,7 +355,7 @@ class StudioMCPBridge:
                     "id": req_id,
                     "error": {"code": -32603, "message": "Failed to send tool call to StudioMCP process"}
                 }
-            resp = self.read_from_proc()
+            resp = self.read_from_proc(target_id=req_id)
             if resp is None:
                 return {
                     "jsonrpc": "2.0",
@@ -258,10 +365,13 @@ class StudioMCPBridge:
 
             if isinstance(resp, dict) and "result" in resp:
                 content = resp["result"].get("content", [])
-                if isinstance(content, list) and len(content) > 0:
-                    err_text = content[0].get("text", "")
+                is_error = resp["result"].get("isError", False)
+                if is_error and isinstance(content, list) and len(content) > 0:
+                    err_text = content[0].get("text", "") if isinstance(content[0], dict) else ""
                     if "Not connected" in err_text or "No active studio" in err_text:
                         self.active_studio_set = False
+                elif not is_error and tool_name == "set_active_studio":
+                    self.active_studio_set = True
 
             return resp
 
@@ -275,7 +385,7 @@ class StudioMCPBridge:
                     "id": req_id,
                     "error": {"code": -32603, "message": f"Failed to send {method} to StudioMCP process"}
                 }
-            resp = self.read_from_proc()
+            resp = self.read_from_proc(target_id=req_id)
             if resp is None:
                 return {
                     "jsonrpc": "2.0",
@@ -320,12 +430,17 @@ class StudioMCPBridge:
                 pass
 
     def close(self):
+        self._stop_reader = True
         if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
             try:
+                self.proc.terminate()
                 self.proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+            except (subprocess.TimeoutExpired, OSError):
+                try:
+                    self.proc.kill()
+                except OSError:
+                    pass
+        self.proc = None
 
 
 def main():
