@@ -23,24 +23,30 @@ def reconfigure_io():
 
 def find_studio_mcp_path():
     """
-    Locates StudioMCP.exe via STUDIO_MCP_PATH env var or by searching Roblox Versions.
+    Locates StudioMCP.exe via STUDIO_MCP_PATH env var or by searching Roblox Versions directories.
     Returns the executable with the latest modification time if multiple versions exist.
     """
     env_path = os.environ.get("STUDIO_MCP_PATH")
     if env_path and os.path.isfile(env_path):
         return env_path
 
-    versions_dir = os.path.expandvars(r"%LOCALAPPDATA%\Roblox\Versions")
+    search_dirs = [
+        os.path.expandvars(r"%LOCALAPPDATA%\Roblox\Versions"),
+        os.path.expandvars(r"%PROGRAMFILES%\Roblox\Versions"),
+        os.path.expandvars(r"%PROGRAMFILES(X86)%\Roblox\Versions"),
+    ]
+
     candidates = []
-    if os.path.exists(versions_dir):
-        for root, _, files in os.walk(versions_dir):
-            if "StudioMCP.exe" in files:
-                full_path = os.path.join(root, "StudioMCP.exe")
-                try:
-                    mtime = os.path.getmtime(full_path)
-                    candidates.append((mtime, full_path))
-                except OSError:
-                    candidates.append((0, full_path))
+    for versions_dir in search_dirs:
+        if os.path.exists(versions_dir):
+            for root, _, files in os.walk(versions_dir):
+                if "StudioMCP.exe" in files:
+                    full_path = os.path.join(root, "StudioMCP.exe")
+                    try:
+                        mtime = os.path.getmtime(full_path)
+                        candidates.append((mtime, full_path))
+                    except OSError:
+                        candidates.append((0, full_path))
 
     if candidates:
         candidates.sort(key=lambda x: x[0], reverse=True)
@@ -61,7 +67,7 @@ class StudioMCPBridge:
             self.studio_mcp_path = find_studio_mcp_path()
 
         if not self.studio_mcp_path:
-            sys.stderr.write("Error: Could not locate StudioMCP.exe in %LOCALAPPDATA%\\Roblox\\Versions\n")
+            sys.stderr.write("Error: Could not locate StudioMCP.exe in Roblox Versions directories\n")
             sys.exit(1)
 
         self.proc = subprocess.Popen(
@@ -74,7 +80,13 @@ class StudioMCPBridge:
             bufsize=1
         )
 
+    def ensure_proc_running(self):
+        if self.proc is None or self.proc.poll() is not None:
+            self.start_process()
+            self.init_proc()
+
     def send_to_proc(self, msg):
+        self.ensure_proc_running()
         if not self.proc or not self.proc.stdin or self.proc.poll() is not None:
             return False
         payload = json.dumps(msg) + "\n"
@@ -138,6 +150,8 @@ class StudioMCPBridge:
                         err_text = content[0].get("text", "")
                         if "Not connected" in err_text or "No active studio" in err_text:
                             self.active_studio_set = False
+                            if name not in ["list_roblox_studios", "set_active_studio"]:
+                                self.ensure_active_studio()
                             time.sleep(0.3)
                             continue
                 return res
@@ -168,10 +182,28 @@ class StudioMCPBridge:
 
     def handle_message(self, req):
         if not isinstance(req, dict):
-            return None
+            return {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {
+                    "code": -32600,
+                    "message": "Invalid Request: expected a JSON object"
+                }
+            }
 
         req_id = req.get("id")
         method = req.get("method")
+
+        if not isinstance(method, str) or not method:
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id if (isinstance(req_id, (str, int, float)) or req_id is None) else None,
+                "error": {
+                    "code": -32600,
+                    "message": "Invalid Request: missing or invalid method"
+                }
+            }
+
         has_id = ("id" in req and req_id is not None)
 
         if not has_id:
@@ -257,11 +289,15 @@ class StudioMCPBridge:
                 }
 
             if isinstance(resp, dict) and "result" in resp:
-                content = resp["result"].get("content", [])
+                result_obj = resp["result"]
+                content = result_obj.get("content", [])
+                is_error = result_obj.get("isError", False)
                 if isinstance(content, list) and len(content) > 0:
                     err_text = content[0].get("text", "")
                     if "Not connected" in err_text or "No active studio" in err_text:
                         self.active_studio_set = False
+                if tool_name == "set_active_studio" and not is_error:
+                    self.active_studio_set = True
 
             return resp
 
