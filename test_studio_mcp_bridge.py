@@ -170,6 +170,81 @@ class TestStudioMCPBridge(unittest.TestCase):
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
 
+    def test_call_proc_tool_retry_attempts_rebind(self):
+        bridge = StudioMCPBridge()
+        bridge.active_studio_set = True
+
+        err_resp = {
+            "jsonrpc": "2.0",
+            "id": "__bridge_tool_test_0",
+            "result": {
+                "isError": True,
+                "content": [{"type": "text", "text": "Not connected"}]
+            }
+        }
+
+        success_resp = {
+            "jsonrpc": "2.0",
+            "id": "__bridge_tool_test_1",
+            "result": {
+                "content": [{"type": "text", "text": "OK"}]
+            }
+        }
+
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", side_effect=[err_resp, success_resp]), \
+             patch.object(bridge, "ensure_active_studio") as mock_ensure:
+            res = bridge.call_proc_tool("execute_luau", {}, "test")
+            self.assertEqual(res, success_resp)
+            mock_ensure.assert_called_once()
+
+    def test_explicit_set_active_studio_sets_flag(self):
+        bridge = StudioMCPBridge()
+        bridge.active_studio_set = False
+
+        set_resp = {
+            "jsonrpc": "2.0",
+            "id": 99,
+            "result": {
+                "content": [{"type": "text", "text": "Active studio set"}],
+                "isError": False
+            }
+        }
+
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", return_value=set_resp):
+            req = {
+                "jsonrpc": "2.0",
+                "id": 99,
+                "method": "tools/call",
+                "params": {"name": "set_active_studio", "arguments": {"studio_id": "123"}}
+            }
+            resp = bridge.handle_message(req)
+            self.assertEqual(resp["id"], 99)
+            self.assertTrue(bridge.active_studio_set)
+
+    def test_invalid_jsonrpc_request_returns_error(self):
+        bridge = StudioMCPBridge()
+
+        # Non-dict request
+        resp1 = bridge.handle_message("not a dict")
+        self.assertEqual(resp1["error"]["code"], -32600)
+
+        # Missing method
+        resp2 = bridge.handle_message({"jsonrpc": "2.0", "id": 1})
+        self.assertEqual(resp2["error"]["code"], -32600)
+
+    def test_ensure_proc_running_restarts_dead_proc(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1  # Exited
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            bridge.ensure_proc_running()
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,10 +9,13 @@ echo.
 set "TARGET_DIR=%LOCALAPPDATA%\Roblox"
 
 if not exist "%TARGET_DIR%" (
-    echo [ERROR] Could not find Roblox directory at %TARGET_DIR%
-    echo Please make sure Roblox Studio is installed.
-    pause
-    exit /b 1
+    echo [NOTICE] Roblox directory not found at %TARGET_DIR%. Creating directory...
+    mkdir "%TARGET_DIR%" >nul 2>&1
+    if !ERRORLEVEL! neq 0 (
+        echo [ERROR] Failed to create directory at %TARGET_DIR%
+        pause
+        exit /b 1
+    )
 )
 
 :: Check for Python
