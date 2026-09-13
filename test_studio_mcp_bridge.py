@@ -170,6 +170,88 @@ class TestStudioMCPBridge(unittest.TestCase):
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
 
+    def test_find_studio_mcp_path_case_insensitive(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            vdir = os.path.join(tmpdir, "version-lowercase")
+            os.makedirs(vdir)
+            exe_path = os.path.join(vdir, "studiomcp.exe")
+            with open(exe_path, "w") as f:
+                f.write("lowercase exe")
+
+            with patch("os.path.expandvars", return_value=tmpdir):
+                with patch.dict(os.environ, {}, clear=True):
+                    found = find_studio_mcp_path()
+                    self.assertEqual(os.path.abspath(found), os.path.abspath(exe_path))
+
+    def test_ensure_process_alive_restarts_dead_proc(self):
+        bridge = StudioMCPBridge(studio_mcp_path="/dummy/StudioMCP.exe")
+        mock_dead_proc = MagicMock()
+        mock_dead_proc.poll.return_value = 1
+        bridge.proc = mock_dead_proc
+
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            alive = bridge.ensure_process_alive()
+            self.assertFalse(alive)
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+
+    def test_read_from_proc_target_id_filtering(self):
+        mock_stdout = io.StringIO(
+            json.dumps({"jsonrpc": "2.0", "id": "other_id", "result": {}}) + "\n" +
+            json.dumps({"jsonrpc": "2.0", "id": "target_123", "result": {"success": True}}) + "\n"
+        )
+        mock_proc = MagicMock()
+        mock_proc.stdout = mock_stdout
+        mock_proc.poll.return_value = None
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        res = bridge.read_from_proc(target_id="target_123", timeout=1.0)
+        self.assertIsNotNone(res)
+        self.assertEqual(res.get("id"), "target_123")
+        self.assertTrue(res.get("result", {}).get("success"))
+
+    def test_reconfigure_io_handles_none_streams(self):
+        with patch("sys.stdin", None), patch("sys.stdout", None), patch("sys.stderr", None):
+            try:
+                reconfigure_io()
+            except Exception as e:
+                self.fail(f"reconfigure_io raised unexpected exception: {e}")
+
+    def test_tool_call_auto_retry_on_disconnection(self):
+        bridge = StudioMCPBridge()
+
+        not_connected_resp = {
+            "jsonrpc": "2.0",
+            "id": 99,
+            "result": {
+                "isError": True,
+                "content": [{"type": "text", "text": "Not connected to Studio"}]
+            }
+        }
+        success_resp = {
+            "jsonrpc": "2.0",
+            "id": 99,
+            "result": {
+                "isError": False,
+                "content": [{"type": "text", "text": "Executed successfully"}]
+            }
+        }
+
+        with patch.object(bridge, "ensure_active_studio") as mock_ensure, \
+             patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", side_effect=[not_connected_resp, success_resp]):
+            req = {
+                "jsonrpc": "2.0",
+                "id": 99,
+                "method": "tools/call",
+                "params": {"name": "run_script", "arguments": {}}
+            }
+            resp = bridge.handle_message(req)
+            self.assertEqual(resp["id"], 99)
+            self.assertFalse(resp["result"]["isError"])
+            self.assertEqual(mock_ensure.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
