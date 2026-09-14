@@ -3,6 +3,7 @@ import sys
 import io
 import json
 import tempfile
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -13,7 +14,7 @@ from studio_mcp_bridge import StudioMCPBridge, find_studio_mcp_path, reconfigure
 class TestStudioMCPBridge(unittest.TestCase):
 
     def test_find_studio_mcp_path_env_var(self):
-        with patch.dict(os.environ, {"STUDIO_MCP_PATH": "/custom/path/StudioMCP.exe"}):
+        with patch.dict(os.environ, {"STUDIO_MCP_PATH": '"/custom/path/StudioMCP.exe"'}):
             with patch("os.path.isfile", return_value=True):
                 path = find_studio_mcp_path()
                 self.assertEqual(path, "/custom/path/StudioMCP.exe")
@@ -44,6 +45,7 @@ class TestStudioMCPBridge(unittest.TestCase):
     def test_init_proc(self):
         mock_proc = MagicMock()
         mock_proc.stdin = io.StringIO()
+        mock_proc.stdout = None
         mock_proc.poll.return_value = None
 
         bridge = StudioMCPBridge(proc=mock_proc)
@@ -67,7 +69,7 @@ class TestStudioMCPBridge(unittest.TestCase):
     def test_handle_message_server_discover(self):
         bridge = StudioMCPBridge()
         with patch.object(bridge, "send_to_proc", return_value=True), \
-             patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": "list_discover", "result": {"tools": [{"name": "test_tool"}]}}):
+             patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": "list_discover_2", "result": {"tools": [{"name": "test_tool"}]}}):
             req = {"jsonrpc": "2.0", "id": 2, "method": "server/discover"}
             resp = bridge.handle_message(req)
             self.assertEqual(resp["id"], 2)
@@ -77,6 +79,7 @@ class TestStudioMCPBridge(unittest.TestCase):
     def test_handle_message_notification_does_not_wait(self):
         mock_proc = MagicMock()
         mock_proc.stdin = io.StringIO()
+        mock_proc.stdout = None
         mock_proc.poll.return_value = None
 
         bridge = StudioMCPBridge(proc=mock_proc)
@@ -165,10 +168,50 @@ class TestStudioMCPBridge(unittest.TestCase):
     def test_close_teardown(self):
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
+        mock_proc.stdin = MagicMock()
+        mock_proc.stdout = None
         bridge = StudioMCPBridge(proc=mock_proc)
         bridge.close()
+        mock_proc.stdin.close.assert_called_once()
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
+
+    def test_read_from_proc_queue_and_matching(self):
+        bridge = StudioMCPBridge()
+        # Put messages in response queue
+        bridge.response_queue.put({"jsonrpc": "2.0", "id": "other_id", "result": "other"})
+        bridge.response_queue.put({"jsonrpc": "2.0", "id": "target_id", "result": "target"})
+
+        res = bridge.read_from_proc(timeout=1.0, expected_id="target_id")
+        self.assertEqual(res["id"], "target_id")
+        self.assertEqual(res["result"], "target")
+        self.assertIn("other_id", bridge.pending_responses)
+
+    def test_read_from_proc_timeout(self):
+        bridge = StudioMCPBridge()
+        res = bridge.read_from_proc(timeout=0.2, expected_id="nonexistent")
+        self.assertIsNone(res)
+
+    def test_auto_reconnect_on_dead_process(self):
+        bridge = StudioMCPBridge()
+        dead_proc = MagicMock()
+        dead_proc.poll.return_value = 1  # exited
+        dead_proc.stdin = MagicMock()
+        dead_proc.stdout = None
+        bridge.proc = dead_proc
+
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            new_proc = MagicMock()
+            new_proc.poll.return_value = None
+            def fake_start():
+                bridge.proc = new_proc
+            mock_start.side_effect = fake_start
+
+            running = bridge.ensure_process_running()
+            self.assertTrue(running)
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
 
 
 if __name__ == "__main__":
