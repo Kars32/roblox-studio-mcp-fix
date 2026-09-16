@@ -170,6 +170,50 @@ class TestStudioMCPBridge(unittest.TestCase):
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
 
+    def test_read_from_proc_expected_id_filtering(self):
+        bridge = StudioMCPBridge()
+        bridge.msg_queue.put({"jsonrpc": "2.0", "id": "other_id", "result": {}})
+        bridge.msg_queue.put({"jsonrpc": "2.0", "id": "target_id", "result": {"success": True}})
+
+        res = bridge.read_from_proc(expected_id="target_id", timeout=0.5)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["id"], "target_id")
+        self.assertEqual(res["result"]["success"], True)
+
+        stashed_res = bridge.read_from_proc(timeout=0.5)
+        self.assertEqual(stashed_res["id"], "other_id")
+
+    def test_read_from_proc_timeout(self):
+        bridge = StudioMCPBridge()
+        res = bridge.read_from_proc(expected_id="non_existent", timeout=0.05)
+        self.assertIsNone(res)
+
+    def test_ensure_process_running_auto_restart(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1  # terminated
+        bridge = StudioMCPBridge(proc=mock_proc)
+
+        with patch.object(bridge, "close") as mock_close, \
+             patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            status = bridge.ensure_process_running()
+            self.assertTrue(status)
+            mock_close.assert_called_once()
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+
+    def test_find_studio_mcp_path_localappdata_env(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            versions_dir = os.path.join(tmpdir, "Roblox", "Versions", "version-a")
+            os.makedirs(versions_dir)
+            exe_path = os.path.join(versions_dir, "StudioMCP.exe")
+            with open(exe_path, "w") as f:
+                f.write("exe")
+
+            with patch.dict(os.environ, {"LOCALAPPDATA": tmpdir}, clear=True):
+                found = find_studio_mcp_path()
+                self.assertEqual(os.path.abspath(found), os.path.abspath(exe_path))
+
 
 if __name__ == "__main__":
     unittest.main()
