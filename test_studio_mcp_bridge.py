@@ -3,6 +3,7 @@ import sys
 import io
 import json
 import tempfile
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -169,6 +170,93 @@ class TestStudioMCPBridge(unittest.TestCase):
         bridge.close()
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
+
+    def test_reader_thread_id_matching(self):
+        bridge = StudioMCPBridge()
+        mock_thread = MagicMock()
+        mock_thread.is_alive.return_value = True
+        bridge._reader_thread = mock_thread
+
+        with bridge._cond:
+            bridge._pending_responses["req_123"] = {"jsonrpc": "2.0", "id": "req_123", "result": "ok"}
+            bridge._pending_responses["req_456"] = {"jsonrpc": "2.0", "id": "req_456", "result": "ok2"}
+
+        res = bridge.read_from_proc(req_id="req_456", timeout=1.0)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["id"], "req_456")
+
+    def test_async_notification_forwarding(self):
+        class DummyStdout:
+            def __init__(self):
+                self.lines = []
+            def readline(self):
+                if not self.lines:
+                    return ""
+                return self.lines.pop(0)
+
+        mock_proc = MagicMock()
+        mock_proc.stdout = DummyStdout()
+        mock_proc.stdout.lines = [
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}) + "\n"
+        ]
+        mock_proc.poll.return_value = None
+
+        stdout_capture = io.StringIO()
+        with patch("sys.stdout", stdout_capture):
+            bridge = StudioMCPBridge(proc=mock_proc)
+            time.sleep(0.2)
+            bridge.close()
+
+        captured = stdout_capture.getvalue()
+        self.assertIn("notifications/tools/list_changed", captured)
+
+    def test_ensure_proc_running_auto_restart(self):
+        bridge = StudioMCPBridge(studio_mcp_path="/mock/StudioMCP.exe")
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1  # terminated
+        bridge.proc = mock_proc
+
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            bridge.ensure_proc_running()
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+
+    def test_transparent_tool_call_retry(self):
+        bridge = StudioMCPBridge()
+        bridge.active_studio_set = True
+
+        not_connected_resp = {
+            "jsonrpc": "2.0",
+            "id": 100,
+            "result": {
+                "isError": True,
+                "content": [{"type": "text", "text": "Not connected to Studio"}]
+            }
+        }
+        success_retry_resp = {
+            "jsonrpc": "2.0",
+            "id": "100_retry",
+            "result": {
+                "isError": False,
+                "content": [{"type": "text", "text": "Execution successful"}]
+            }
+        }
+
+        with patch.object(bridge, "ensure_active_studio", return_value=True) as mock_ensure, \
+             patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", side_effect=[not_connected_resp, success_retry_resp]):
+            req = {
+                "jsonrpc": "2.0",
+                "id": 100,
+                "method": "tools/call",
+                "params": {"name": "execute_luau", "arguments": {}}
+            }
+            resp = bridge.handle_message(req)
+            self.assertEqual(resp["id"], 100)
+            self.assertFalse(resp["result"]["isError"])
+            self.assertEqual(resp["result"]["content"][0]["text"], "Execution successful")
+            mock_ensure.assert_called()
 
 
 if __name__ == "__main__":
