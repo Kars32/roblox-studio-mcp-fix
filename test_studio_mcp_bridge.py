@@ -13,10 +13,63 @@ from studio_mcp_bridge import StudioMCPBridge, find_studio_mcp_path, reconfigure
 class TestStudioMCPBridge(unittest.TestCase):
 
     def test_find_studio_mcp_path_env_var(self):
-        with patch.dict(os.environ, {"STUDIO_MCP_PATH": "/custom/path/StudioMCP.exe"}):
+        with patch.dict(os.environ, {"STUDIO_MCP_PATH": "%MY_DIR%/StudioMCP.exe", "MY_DIR": "/custom/path"}):
             with patch("os.path.isfile", return_value=True):
                 path = find_studio_mcp_path()
                 self.assertEqual(path, "/custom/path/StudioMCP.exe")
+
+    def test_read_response_for_id_skips_unrelated(self):
+        bridge = StudioMCPBridge()
+        responses = [
+            {"jsonrpc": "2.0", "method": "some/notification"},
+            {"jsonrpc": "2.0", "id": "other_id", "result": {}},
+            {"jsonrpc": "2.0", "id": "target_id", "result": {"success": True}}
+        ]
+        with patch.object(bridge, "read_from_proc", side_effect=responses):
+            res = bridge.read_response_for_id("target_id", timeout=1.0)
+            self.assertIsNotNone(res)
+            self.assertEqual(res.get("id"), "target_id")
+            self.assertEqual(res["result"]["success"], True)
+
+    def test_ensure_process_alive_restarts_dead_proc(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1  # process exited
+        bridge = StudioMCPBridge(proc=mock_proc)
+
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            bridge.ensure_process_alive()
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+
+    def test_tools_call_auto_retry_on_not_connected(self):
+        bridge = StudioMCPBridge()
+        bridge.active_studio_set = True
+
+        not_connected_resp = {
+            "jsonrpc": "2.0",
+            "id": 99,
+            "result": {
+                "isError": True,
+                "content": [{"type": "text", "text": "Not connected to Studio"}]
+            }
+        }
+        success_resp = {
+            "jsonrpc": "2.0",
+            "id": 99,
+            "result": {
+                "isError": False,
+                "content": [{"type": "text", "text": "Success"}]
+            }
+        }
+
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_response_for_id", side_effect=[not_connected_resp, success_resp]), \
+             patch.object(bridge, "ensure_active_studio", return_value=True):
+            req = {"jsonrpc": "2.0", "id": 99, "method": "tools/call", "params": {"name": "test_tool"}}
+            resp = bridge.handle_message(req)
+            self.assertEqual(resp["id"], 99)
+            self.assertFalse(resp["result"]["isError"])
 
     def test_find_studio_mcp_path_mtime_sorting(self):
         with tempfile.TemporaryDirectory() as tmpdir:
