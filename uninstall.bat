@@ -11,6 +11,8 @@ set "TARGET_DIR=%LOCALAPPDATA%\Roblox"
 if exist "%TARGET_DIR%\studio_mcp_bridge.py" (
     del /f /q "%TARGET_DIR%\studio_mcp_bridge.py"
     echo Removed studio_mcp_bridge.py
+) else (
+    echo [NOTICE] studio_mcp_bridge.py not found in %TARGET_DIR%
 )
 
 if exist "%TARGET_DIR%\mcp.bat.backup" (

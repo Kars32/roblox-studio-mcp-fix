@@ -162,6 +162,54 @@ class TestStudioMCPBridge(unittest.TestCase):
             self.assertIn("error", resp)
             self.assertEqual(resp["error"]["code"], -32603)
 
+    def test_ensure_active_studio_malformed_json_content(self):
+        bridge = StudioMCPBridge()
+        # Invalid JSON string in content text
+        mock_resp = {
+            "jsonrpc": "2.0",
+            "id": "__bridge_tool_list_0",
+            "result": {
+                "content": [{"type": "text", "text": "{ invalid json ... "}]
+            }
+        }
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", return_value=mock_resp):
+            success = bridge.ensure_active_studio()
+            self.assertFalse(success)
+            self.assertFalse(bridge.active_studio_set)
+
+    def test_ensure_active_studio_non_dict_content(self):
+        bridge = StudioMCPBridge()
+        mock_resp = {
+            "jsonrpc": "2.0",
+            "id": "__bridge_tool_list_0",
+            "result": {
+                "content": ["not a dict"]
+            }
+        }
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", return_value=mock_resp):
+            success = bridge.ensure_active_studio()
+            self.assertFalse(success)
+            self.assertFalse(bridge.active_studio_set)
+
+    def test_init_proc_returns_none_when_proc_fails(self):
+        bridge = StudioMCPBridge()
+        with patch.object(bridge, "send_to_proc", return_value=False):
+            res = bridge.init_proc()
+            self.assertIsNone(res)
+            self.assertIsNone(bridge.init_res)
+
+    def test_call_proc_tool_stops_early_when_proc_dead(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1  # process terminated
+        bridge = StudioMCPBridge(proc=mock_proc)
+
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", return_value=None):
+            res = bridge.call_proc_tool("some_tool", {}, "test_call")
+            self.assertIsNone(res)
+
     def test_close_teardown(self):
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None

@@ -102,6 +102,8 @@ class StudioMCPBridge:
                 return json.loads(line_str)
             except Exception:
                 pass
+            if self.proc and self.proc.poll() is not None:
+                return None
 
     def init_proc(self):
         if not self.send_to_proc({
@@ -116,7 +118,8 @@ class StudioMCPBridge:
         }):
             return None
         self.init_res = self.read_from_proc()
-        self.send_to_proc({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        if self.init_res is not None:
+            self.send_to_proc({"jsonrpc": "2.0", "method": "notifications/initialized"})
         return self.init_res
 
     def call_proc_tool(self, name, args, call_id):
@@ -130,17 +133,23 @@ class StudioMCPBridge:
             }):
                 return None
             res = self.read_from_proc()
+            if res is None:
+                if self.proc and self.proc.poll() is not None:
+                    return None
             if res and isinstance(res, dict) and res.get("id") == req_id:
                 if "result" in res:
                     content = res["result"].get("content", [])
                     is_error = res["result"].get("isError", False)
                     if is_error and isinstance(content, list) and len(content) > 0:
-                        err_text = content[0].get("text", "")
-                        if "Not connected" in err_text or "No active studio" in err_text:
+                        first_item = content[0]
+                        err_text = first_item.get("text", "") if isinstance(first_item, dict) else ""
+                        if isinstance(err_text, str) and ("Not connected" in err_text or "No active studio" in err_text):
                             self.active_studio_set = False
                             time.sleep(0.3)
                             continue
                 return res
+            if self.proc and self.proc.poll() is not None:
+                return None
             time.sleep(0.2)
         return None
 
@@ -149,19 +158,25 @@ class StudioMCPBridge:
             return True
         try:
             res = self.call_proc_tool("list_roblox_studios", {}, "list")
-            if res and "result" in res:
+            if res and isinstance(res, dict) and "result" in res:
                 content = res["result"].get("content", [])
                 if content and isinstance(content, list) and len(content) > 0:
-                    txt = content[0].get("text", "{}")
-                    data = json.loads(txt)
-                    studios = data.get("studios", [])
-                    if studios and isinstance(studios, list) and len(studios) > 0:
-                        sid = studios[0].get("id")
-                        if sid:
-                            set_res = self.call_proc_tool("set_active_studio", {"studio_id": sid}, "set")
-                            if set_res and not set_res.get("result", {}).get("isError", False):
-                                self.active_studio_set = True
-                                return True
+                    first_item = content[0]
+                    txt = first_item.get("text", "{}") if isinstance(first_item, dict) else "{}"
+                    data = json.loads(txt) if isinstance(txt, str) else {}
+                    if isinstance(data, dict):
+                        studios = data.get("studios", [])
+                        if studios and isinstance(studios, list) and len(studios) > 0:
+                            first_studio = studios[0]
+                            if isinstance(first_studio, dict):
+                                sid = first_studio.get("id")
+                                if sid:
+                                    set_res = self.call_proc_tool("set_active_studio", {"studio_id": sid}, "set")
+                                    if set_res and isinstance(set_res, dict) and not set_res.get("result", {}).get("isError", False):
+                                        self.active_studio_set = True
+                                        return True
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            pass
         except Exception:
             pass
         return False
@@ -259,8 +274,9 @@ class StudioMCPBridge:
             if isinstance(resp, dict) and "result" in resp:
                 content = resp["result"].get("content", [])
                 if isinstance(content, list) and len(content) > 0:
-                    err_text = content[0].get("text", "")
-                    if "Not connected" in err_text or "No active studio" in err_text:
+                    first_item = content[0]
+                    err_text = first_item.get("text", "") if isinstance(first_item, dict) else ""
+                    if isinstance(err_text, str) and ("Not connected" in err_text or "No active studio" in err_text):
                         self.active_studio_set = False
 
             return resp
