@@ -170,6 +170,96 @@ class TestStudioMCPBridge(unittest.TestCase):
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
 
+    def test_extract_text_from_content(self):
+        from studio_mcp_bridge import extract_text_from_content
+        self.assertEqual(extract_text_from_content("plain text"), "plain text")
+        self.assertEqual(extract_text_from_content([{"type": "text", "text": "hello"}]), "hello")
+        self.assertEqual(extract_text_from_content({"text": "dict text"}), "dict text")
+        self.assertEqual(extract_text_from_content([]), "")
+        self.assertEqual(extract_text_from_content(None), "")
+
+    def test_find_studio_mcp_path_quoted_env_and_case_insensitive(self):
+        with patch.dict(os.environ, {"STUDIO_MCP_PATH": '"/custom/path/StudioMCP.exe"'}):
+            with patch("os.path.isfile", return_value=True):
+                path = find_studio_mcp_path()
+                self.assertEqual(path, "/custom/path/StudioMCP.exe")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            v1 = os.path.join(tmpdir, "version-lower")
+            os.makedirs(v1)
+            exe_lower = os.path.join(v1, "studiomcp.exe")
+            with open(exe_lower, "w") as f:
+                f.write("exe")
+
+            with patch("os.path.expandvars", return_value=tmpdir):
+                with patch.dict(os.environ, {}, clear=True):
+                    found = find_studio_mcp_path()
+                    self.assertEqual(os.path.abspath(found), os.path.abspath(exe_lower))
+
+    def test_read_response_notification_forwarding(self):
+        mock_proc = MagicMock()
+        mock_stdout = io.StringIO(
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}) + "\n" +
+            json.dumps({"jsonrpc": "2.0", "id": "req_1", "result": {}}) + "\n"
+        )
+        mock_proc.stdout = mock_stdout
+        mock_proc.poll.return_value = None
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        with patch("sys.stdout", new_callable=io.StringIO) as fake_stdout:
+            resp = bridge.read_response(expected_id="req_1")
+            self.assertEqual(resp["id"], "req_1")
+            forwarded = fake_stdout.getvalue()
+            self.assertIn("notifications/tools/list_changed", forwarded)
+
+    def test_ensure_proc_running_restarts_dead_process(self):
+        mock_dead_proc = MagicMock()
+        mock_dead_proc.poll.return_value = 1
+
+        bridge = StudioMCPBridge(proc=mock_dead_proc)
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            bridge.ensure_proc_running()
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+
+    def test_handle_message_tools_call_auto_retry(self):
+        bridge = StudioMCPBridge()
+        bridge.active_studio_set = True
+
+        not_connected_resp = {
+            "jsonrpc": "2.0",
+            "id": 99,
+            "result": {
+                "isError": True,
+                "content": [{"type": "text", "text": "Not connected to Studio"}]
+            }
+        }
+        success_retry_resp = {
+            "jsonrpc": "2.0",
+            "id": 99,
+            "result": {
+                "isError": False,
+                "content": [{"type": "text", "text": "Executed successfully"}]
+            }
+        }
+
+        read_responses = [not_connected_resp, success_retry_resp]
+
+        with patch.object(bridge, "ensure_active_studio", return_value=True) as mock_ensure, \
+             patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", side_effect=read_responses):
+
+            req = {
+                "jsonrpc": "2.0",
+                "id": 99,
+                "method": "tools/call",
+                "params": {"name": "execute_luau", "arguments": {}}
+            }
+            resp = bridge.handle_message(req)
+            self.assertEqual(resp["result"]["content"][0]["text"], "Executed successfully")
+            mock_ensure.assert_called()
+
 
 if __name__ == "__main__":
     unittest.main()
