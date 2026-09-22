@@ -170,6 +170,79 @@ class TestStudioMCPBridge(unittest.TestCase):
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
 
+    def test_find_studio_mcp_path_quoted_env_var(self):
+        with tempfile.NamedTemporaryFile(suffix=".exe") as tmp:
+            quoted_path = f'"{tmp.name}"'
+            with patch.dict(os.environ, {"STUDIO_MCP_PATH": quoted_path}):
+                path = find_studio_mcp_path()
+                self.assertEqual(path, tmp.name)
+
+    def test_handle_message_invalid_payload_type(self):
+        bridge = StudioMCPBridge()
+        resp = bridge.handle_message("not a dict")
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp["error"]["code"], -32600)
+
+    def test_run_batch_requests(self):
+        bridge = StudioMCPBridge()
+        bridge.init_res = {"result": {"serverInfo": {"name": "RobloxStudio", "version": "1.2.0"}}}
+
+        reqs = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+            {"jsonrpc": "2.0", "id": 2, "method": "ping"},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"}
+        ]
+
+        with patch("sys.stdin", io.StringIO(json.dumps(reqs) + "\n")), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            bridge.run()
+            output = mock_stdout.getvalue().strip()
+            resps = json.loads(output)
+            self.assertIsInstance(resps, list)
+            self.assertEqual(len(resps), 2)
+            self.assertEqual(resps[0]["id"], 1)
+            self.assertEqual(resps[1]["id"], 2)
+
+    def test_run_empty_batch_request(self):
+        bridge = StudioMCPBridge()
+        with patch("sys.stdin", io.StringIO("[]\n")), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            bridge.run()
+            output = mock_stdout.getvalue().strip()
+            resp = json.loads(output)
+            self.assertEqual(resp["error"]["code"], -32600)
+
+    def test_ensure_proc_restarts_if_terminated(self):
+        bridge = StudioMCPBridge()
+        mock_dead_proc = MagicMock()
+        mock_dead_proc.poll.return_value = 1
+        bridge.proc = mock_dead_proc
+
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            # When start_process is called, simulate proc becoming active
+            def fake_start():
+                mock_live_proc = MagicMock()
+                mock_live_proc.poll.return_value = None
+                bridge.proc = mock_live_proc
+            mock_start.side_effect = fake_start
+
+            is_alive = bridge.ensure_proc()
+            self.assertTrue(is_alive)
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+
+    def test_call_proc_tool_sync_skips_unmatched_ids(self):
+        bridge = StudioMCPBridge()
+        unmatched_resp = {"jsonrpc": "2.0", "id": "other_id", "result": {}}
+        matching_resp = {"jsonrpc": "2.0", "id": "__bridge_tool_call_0", "result": {"content": [{"text": "ok"}]}}
+
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", side_effect=[unmatched_resp, matching_resp]):
+            res = bridge.call_proc_tool("some_tool", {}, "call")
+            self.assertIsNotNone(res)
+            self.assertEqual(res["id"], "__bridge_tool_call_0")
+
 
 if __name__ == "__main__":
     unittest.main()
