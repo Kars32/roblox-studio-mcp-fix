@@ -18,6 +18,14 @@ class TestStudioMCPBridge(unittest.TestCase):
                 path = find_studio_mcp_path()
                 self.assertEqual(path, "/custom/path/StudioMCP.exe")
 
+    def test_find_studio_mcp_path_fallback(self):
+        with patch("os.path.exists", side_effect=lambda p: "Versions" in p), \
+             patch("os.walk", return_value=[("/mock/user/AppData/Local/Roblox/Versions/v1", [], ["StudioMCP.exe"])]), \
+             patch.dict(os.environ, {"USERPROFILE": "/mock/user"}, clear=True), \
+             patch("os.path.expandvars", return_value="%LOCALAPPDATA%\\Roblox\\Versions"):
+            path = find_studio_mcp_path()
+            self.assertEqual(os.path.abspath(path), os.path.abspath("/mock/user/AppData/Local/Roblox/Versions/v1/StudioMCP.exe"))
+
     def test_find_studio_mcp_path_mtime_sorting(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             v1 = os.path.join(tmpdir, "version-1")
@@ -56,6 +64,12 @@ class TestStudioMCPBridge(unittest.TestCase):
         self.assertIn('"method": "initialize"', stdin_value)
         self.assertIn('"method": "notifications/initialized"', stdin_value)
 
+    def test_invalid_jsonrpc_request_payload(self):
+        bridge = StudioMCPBridge()
+        resp = bridge.handle_message("not_a_json_dict")
+        self.assertEqual(resp["error"]["code"], -32600)
+        self.assertIn("Invalid Request", resp["error"]["message"])
+
     def test_handle_message_initialize(self):
         bridge = StudioMCPBridge()
         bridge.init_res = {"result": {"serverInfo": {"name": "RobloxStudio", "version": "1.2.0"}}}
@@ -67,12 +81,38 @@ class TestStudioMCPBridge(unittest.TestCase):
     def test_handle_message_server_discover(self):
         bridge = StudioMCPBridge()
         with patch.object(bridge, "send_to_proc", return_value=True), \
-             patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": "list_discover", "result": {"tools": [{"name": "test_tool"}]}}):
+             patch.object(bridge, "read_from_proc_for_id", return_value={"jsonrpc": "2.0", "id": "list_discover_2", "result": {"tools": [{"name": "test_tool"}]}}):
             req = {"jsonrpc": "2.0", "id": 2, "method": "server/discover"}
             resp = bridge.handle_message(req)
             self.assertEqual(resp["id"], 2)
             self.assertEqual(len(resp["result"]["tools"]), 1)
             self.assertEqual(resp["result"]["tools"][0]["name"], "test_tool")
+
+    def test_read_from_proc_for_id_matching(self):
+        bridge = StudioMCPBridge()
+        msg1 = {"jsonrpc": "2.0", "id": "req_A", "result": "res_A"}
+        msg2 = {"jsonrpc": "2.0", "id": "req_B", "result": "res_B"}
+
+        with patch.object(bridge, "read_from_proc", side_effect=[msg1, msg2]):
+            res_b = bridge.read_from_proc_for_id("req_B")
+            self.assertEqual(res_b["result"], "res_B")
+            self.assertIn("req_A", bridge.pending_responses)
+
+            res_a = bridge.read_from_proc_for_id("req_A")
+            self.assertEqual(res_a["result"], "res_A")
+
+    def test_ensure_proc_running_auto_restart(self):
+        bridge = StudioMCPBridge()
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1
+        bridge.proc = mock_proc
+
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            running = bridge.ensure_proc_running()
+            self.assertFalse(running)
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
 
     def test_handle_message_notification_does_not_wait(self):
         mock_proc = MagicMock()
