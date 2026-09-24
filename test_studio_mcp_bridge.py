@@ -80,7 +80,8 @@ class TestStudioMCPBridge(unittest.TestCase):
         mock_proc.poll.return_value = None
 
         bridge = StudioMCPBridge(proc=mock_proc)
-        with patch.object(bridge, "read_from_proc") as mock_read:
+        with patch.object(bridge, "read_from_proc") as mock_read, \
+             patch.object(bridge, "ensure_proc_running", return_value=True):
             notification = {"jsonrpc": "2.0", "method": "custom/notify", "params": {"data": 123}}
             resp = bridge.handle_message(notification)
             self.assertIsNone(resp)
@@ -88,6 +89,62 @@ class TestStudioMCPBridge(unittest.TestCase):
 
         written = mock_proc.stdin.getvalue()
         self.assertIn('"method": "custom/notify"', written)
+
+    def test_read_from_proc_forwards_notifications(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        # Process output stream produces a notification first, then a response
+        lines = [
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "id": "req1", "result": {"status": "ok"}}) + "\n"
+        ]
+        mock_proc.stdout.readline.side_effect = lines
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        with patch("sys.stdout", new_callable=io.StringIO) as fake_stdout, \
+             patch.object(bridge, "ensure_proc_running", return_value=True):
+            msg = bridge.read_from_proc(expected_id="req1", timeout=1.0)
+            self.assertEqual(msg.get("id"), "req1")
+            stdout_content = fake_stdout.getvalue()
+            self.assertIn("notifications/tools/list_changed", stdout_content)
+
+    def test_auto_restart_process_on_failure(self):
+        bridge = StudioMCPBridge()
+        bridge.proc = MagicMock()
+        bridge.proc.poll.return_value = None
+        bridge.proc.stdin.write.side_effect = BrokenPipeError("Pipe closed")
+
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            new_mock_proc = MagicMock()
+            new_mock_proc.poll.return_value = None
+            def side_effect_start():
+                bridge.proc = new_mock_proc
+
+            mock_start.side_effect = side_effect_start
+
+            success = bridge.send_to_proc({"jsonrpc": "2.0", "id": 1, "method": "ping"})
+            self.assertTrue(success)
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+            new_mock_proc.stdin.write.assert_called_once()
+
+    def test_ensure_active_studio_non_dict_json(self):
+        bridge = StudioMCPBridge()
+        mock_responses = [
+            {
+                "jsonrpc": "2.0",
+                "id": "__bridge_tool_list_0",
+                "result": {
+                    "content": [{"type": "text", "text": "[\"not\", \"a\", \"dict\"]"}]
+                }
+            }
+        ]
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", side_effect=mock_responses):
+            success = bridge.ensure_active_studio()
+            self.assertFalse(success)
+            self.assertFalse(bridge.active_studio_set)
 
     def test_ensure_active_studio_success(self):
         bridge = StudioMCPBridge()
