@@ -170,6 +170,79 @@ class TestStudioMCPBridge(unittest.TestCase):
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
 
+    def test_read_from_proc_expected_id_and_notification(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        bridge = StudioMCPBridge(proc=mock_proc)
+
+        # Put notification and target message into queue
+        notification = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
+        target_msg = {"jsonrpc": "2.0", "id": "req_123", "result": {"ok": True}}
+        bridge.msg_queue.put(notification)
+        bridge.msg_queue.put(target_msg)
+
+        captured_stdout = io.StringIO()
+        with patch("sys.stdout", captured_stdout):
+            res = bridge.read_from_proc(expected_id="req_123", timeout=1.0)
+            self.assertEqual(res, target_msg)
+
+        # Confirm notification was written to stdout
+        written = captured_stdout.getvalue()
+        self.assertIn('"method": "notifications/tools/list_changed"', written)
+
+    def test_read_from_proc_timeout(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        bridge = StudioMCPBridge(proc=mock_proc)
+
+        res = bridge.read_from_proc(expected_id="non_existent", timeout=0.1)
+        self.assertIsNone(res)
+
+    def test_find_studio_mcp_path_prunes_content_dirs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            versions_dir = os.path.join(tmpdir, "Versions")
+            v1 = os.path.join(versions_dir, "version-1")
+            content_dir = os.path.join(v1, "content")
+            os.makedirs(content_dir)
+
+            exe_in_content = os.path.join(content_dir, "StudioMCP.exe")
+            exe_in_root = os.path.join(v1, "StudioMCP.exe")
+
+            with open(exe_in_content, "w") as f:
+                f.write("content_exe")
+            with open(exe_in_root, "w") as f:
+                f.write("root_exe")
+
+            with patch("os.path.expandvars", return_value=versions_dir):
+                found = find_studio_mcp_path()
+                self.assertEqual(os.path.abspath(found), os.path.abspath(exe_in_root))
+
+    def test_server_discover_failure(self):
+        bridge = StudioMCPBridge()
+        with patch.object(bridge, "send_to_proc", return_value=False):
+            req = {"jsonrpc": "2.0", "id": 99, "method": "server/discover"}
+            resp = bridge.handle_message(req)
+            self.assertEqual(resp["id"], 99)
+            self.assertIn("error", resp)
+            self.assertEqual(resp["error"]["code"], -32603)
+
+    def test_run_exception_recovery(self):
+        bridge = StudioMCPBridge()
+        stdin_data = 'invalid json\n{"jsonrpc": "2.0", "id": 1, "method": "ping"}\n'
+        captured_stdout = io.StringIO()
+
+        with patch("sys.stdin", io.StringIO(stdin_data)), patch("sys.stdout", captured_stdout):
+            bridge.run()
+
+        output = captured_stdout.getvalue().strip().split("\n")
+        self.assertTrue(len(output) >= 2)
+
+        err_resp = json.loads(output[0])
+        self.assertEqual(err_resp["error"]["code"], -32700)
+
+        ping_resp = json.loads(output[1])
+        self.assertEqual(ping_resp["id"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
