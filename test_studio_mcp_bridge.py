@@ -41,6 +41,87 @@ class TestStudioMCPBridge(unittest.TestCase):
                     found = find_studio_mcp_path()
                     self.assertEqual(os.path.abspath(found), os.path.abspath(exe2))
 
+    def test_find_studio_mcp_path_fallback_userprofile(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            roblox_ver_dir = os.path.join(tmpdir, "AppData", "Local", "Roblox", "Versions", "ver1")
+            os.makedirs(roblox_ver_dir)
+            exe_path = os.path.join(roblox_ver_dir, "StudioMCP.exe")
+            with open(exe_path, "w") as f:
+                f.write("exe")
+
+            with patch.dict(os.environ, {"USERPROFILE": tmpdir}, clear=True), \
+                 patch("os.path.expandvars", side_effect=lambda s: s):
+                found = find_studio_mcp_path()
+                self.assertIsNotNone(found)
+                self.assertEqual(os.path.abspath(found), os.path.abspath(exe_path))
+
+    def test_ensure_proc_running_restarts_dead_proc(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1  # Dead process
+
+        bridge = StudioMCPBridge(studio_mcp_path="/mock/StudioMCP.exe", proc=mock_proc)
+        bridge.active_studio_set = True
+
+        new_mock_proc = MagicMock()
+        new_mock_proc.poll.return_value = None  # Alive process
+
+        def fake_start():
+            bridge.proc = new_mock_proc
+            return True
+
+        with patch.object(bridge, "start_process", side_effect=fake_start) as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            is_running = bridge.ensure_proc_running()
+            self.assertTrue(is_running)
+            self.assertFalse(bridge.active_studio_set)
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+
+    def test_handle_message_batch_request(self):
+        bridge = StudioMCPBridge()
+        bridge.init_res = {"result": {"serverInfo": {"name": "RobloxStudio", "version": "1.2.0"}}}
+        batch_req = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+            {"jsonrpc": "2.0", "id": 2, "method": "ping"}
+        ]
+        resp = bridge.handle_message(batch_req)
+        self.assertIsInstance(resp, list)
+        self.assertEqual(len(resp), 2)
+        self.assertEqual(resp[0]["id"], 1)
+        self.assertEqual(resp[1]["id"], 2)
+
+    def test_handle_message_invalid_payload(self):
+        bridge = StudioMCPBridge()
+        resp = bridge.handle_message("not a dict or list")
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp["error"]["code"], -32600)
+
+    def test_handle_message_server_discover_forward_error(self):
+        bridge = StudioMCPBridge()
+        err_res = {"jsonrpc": "2.0", "id": "list_discover", "error": {"code": -32000, "message": "Internal error"}}
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", return_value=err_res):
+            req = {"jsonrpc": "2.0", "id": 3, "method": "server/discover"}
+            resp = bridge.handle_message(req)
+            self.assertEqual(resp["id"], 3)
+            self.assertIn("error", resp)
+            self.assertEqual(resp["error"]["code"], -32000)
+
+    def test_ensure_active_studio_jsonrpc_error_response(self):
+        bridge = StudioMCPBridge()
+        error_resp = {
+            "jsonrpc": "2.0",
+            "id": "__bridge_tool_set_0",
+            "error": {"code": -32603, "message": "Failed to set active studio"}
+        }
+        with patch.object(bridge, "call_proc_tool", side_effect=[
+            {"jsonrpc": "2.0", "result": {"content": [{"text": json.dumps({"studios": [{"id": "s1"}]})}]}},
+            error_resp
+        ]):
+            success = bridge.ensure_active_studio()
+            self.assertFalse(success)
+            self.assertFalse(bridge.active_studio_set)
+
     def test_init_proc(self):
         mock_proc = MagicMock()
         mock_proc.stdin = io.StringIO()
