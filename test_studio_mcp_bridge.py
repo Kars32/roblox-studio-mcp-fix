@@ -3,6 +3,7 @@ import sys
 import io
 import json
 import tempfile
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -67,7 +68,7 @@ class TestStudioMCPBridge(unittest.TestCase):
     def test_handle_message_server_discover(self):
         bridge = StudioMCPBridge()
         with patch.object(bridge, "send_to_proc", return_value=True), \
-             patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": "list_discover", "result": {"tools": [{"name": "test_tool"}]}}):
+             patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": "__bridge_discover__", "result": {"tools": [{"name": "test_tool"}]}}):
             req = {"jsonrpc": "2.0", "id": 2, "method": "server/discover"}
             resp = bridge.handle_message(req)
             self.assertEqual(resp["id"], 2)
@@ -161,6 +162,41 @@ class TestStudioMCPBridge(unittest.TestCase):
             self.assertEqual(resp["id"], 10)
             self.assertIn("error", resp)
             self.assertEqual(resp["error"]["code"], -32603)
+
+    def test_read_from_proc_queue_and_expected_id(self):
+        bridge = StudioMCPBridge()
+        # Put messages out of order in queue
+        msg1 = {"jsonrpc": "2.0", "id": "other_id", "result": "other"}
+        msg2 = {"jsonrpc": "2.0", "id": "target_id", "result": "target"}
+        bridge.msg_queue.put(msg1)
+        bridge.msg_queue.put(msg2)
+
+        res = bridge.read_from_proc(expected_id="target_id", timeout=0.5)
+        self.assertEqual(res["id"], "target_id")
+        # Ensure non-matching message remained in pending queue
+        remaining = bridge.msg_queue.get(block=False)
+        self.assertEqual(remaining["id"], "other_id")
+
+    def test_handle_message_invalid_request_type(self):
+        bridge = StudioMCPBridge()
+        resp = bridge.handle_message("not a dict")
+        self.assertIn("error", resp)
+        self.assertEqual(resp["error"]["code"], -32600)
+
+    def test_non_dict_content_items_handled_gracefully(self):
+        bridge = StudioMCPBridge()
+        non_dict_content_resp = {
+            "jsonrpc": "2.0",
+            "id": "__bridge_tool_test_0",
+            "result": {
+                "isError": True,
+                "content": ["plain string error"]
+            }
+        }
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", return_value=non_dict_content_resp):
+            res = bridge.call_proc_tool("some_tool", {}, "test")
+            self.assertIsNotNone(res)
 
     def test_close_teardown(self):
         mock_proc = MagicMock()
