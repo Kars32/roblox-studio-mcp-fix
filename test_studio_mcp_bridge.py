@@ -170,6 +170,77 @@ class TestStudioMCPBridge(unittest.TestCase):
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
 
+    def test_content_element_not_dict(self):
+        bridge = StudioMCPBridge()
+        bridge.active_studio_set = True
+
+        non_dict_resp = {
+            "jsonrpc": "2.0",
+            "id": 99,
+            "result": {
+                "isError": False,
+                "content": ["plain text string instead of dict"]
+            }
+        }
+
+        with patch.object(bridge, "ensure_active_studio"), \
+             patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", return_value=non_dict_resp):
+            req = {
+                "jsonrpc": "2.0",
+                "id": 99,
+                "method": "tools/call",
+                "params": {"name": "execute_luau", "arguments": {}}
+            }
+            resp = bridge.handle_message(req)
+            self.assertEqual(resp["id"], 99)
+            self.assertTrue(bridge.active_studio_set)
+
+    def test_case_insensitive_find_studio_mcp_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            v1 = os.path.join(tmpdir, "version-1")
+            os.makedirs(v1)
+            exe_lowercase = os.path.join(v1, "studiomcp.exe")
+            with open(exe_lowercase, "w") as f:
+                f.write("test")
+
+            with patch("os.path.expandvars", return_value=tmpdir):
+                with patch.dict(os.environ, {}, clear=True):
+                    found = find_studio_mcp_path()
+                    self.assertIsNotNone(found)
+                    self.assertEqual(os.path.abspath(found), os.path.abspath(exe_lowercase))
+
+    def test_batch_request_handling(self):
+        bridge = StudioMCPBridge()
+        bridge.init_res = {"result": {"serverInfo": {"name": "RobloxStudio", "version": "1.2.0"}}}
+        batch_input = json.dumps([
+            {"jsonrpc": "2.0", "id": 101, "method": "initialize"},
+            {"jsonrpc": "2.0", "id": 102, "method": "ping"}
+        ]) + "\n"
+
+        with patch("sys.stdin", io.StringIO(batch_input)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            bridge.run()
+            output = mock_stdout.getvalue()
+            self.assertTrue(output)
+            resps = json.loads(output.strip())
+            self.assertIsInstance(resps, list)
+            self.assertEqual(len(resps), 2)
+            self.assertEqual(resps[0]["id"], 101)
+            self.assertEqual(resps[1]["id"], 102)
+
+    def test_ensure_process_running_recovery(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1  # dead process
+
+        bridge = StudioMCPBridge(studio_mcp_path="/mock/StudioMCP.exe", proc=mock_proc)
+        with patch("os.path.isfile", return_value=True), \
+             patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            bridge.ensure_process_running()
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
