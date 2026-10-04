@@ -170,6 +170,66 @@ class TestStudioMCPBridge(unittest.TestCase):
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
 
+    def test_read_from_proc_expected_id_filtering(self):
+        mock_proc = MagicMock()
+        # Simulated stdout output with mixed response IDs and notifications
+        lines = [
+            json.dumps({"jsonrpc": "2.0", "method": "custom/notify"}),
+            json.dumps({"jsonrpc": "2.0", "id": "other_id", "result": "wrong"}),
+            json.dumps({"jsonrpc": "2.0", "id": "target_id", "result": "correct"})
+        ]
+        mock_proc.stdout.readline.side_effect = [line + "\n" for line in lines]
+        mock_proc.poll.return_value = None
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        res = bridge.read_from_proc(expected_id="target_id")
+        self.assertIsNotNone(res)
+        self.assertEqual(res.get("id"), "target_id")
+        self.assertEqual(res.get("result"), "correct")
+
+    def test_ensure_proc_running_restarts_dead_process(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1 # Dead process
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        bridge.active_studio_set = True
+
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            bridge.ensure_proc_running()
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+            self.assertFalse(bridge.active_studio_set)
+
+    def test_handle_batch_request(self):
+        bridge = StudioMCPBridge()
+        bridge.init_res = {"result": {"serverInfo": {"name": "RobloxStudio"}}}
+
+        batch_req = [
+            {"jsonrpc": "2.0", "id": 101, "method": "initialize"},
+            {"jsonrpc": "2.0", "id": 102, "method": "ping"}
+        ]
+
+        responses = bridge.handle_message(batch_req)
+        self.assertIsInstance(responses, list)
+        self.assertEqual(len(responses), 2)
+        self.assertEqual(responses[0]["id"], 101)
+        self.assertEqual(responses[1]["id"], 102)
+
+    def test_find_studio_mcp_path_fallback_home(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            roblox_versions = os.path.join(tmpdir, "AppData", "Local", "Roblox", "Versions", "version-abc")
+            os.makedirs(roblox_versions)
+            exe_path = os.path.join(roblox_versions, "StudioMCP.exe")
+            with open(exe_path, "w") as f:
+                f.write("exe")
+
+            with patch.dict(os.environ, {}, clear=True), \
+                 patch("os.path.expanduser", return_value=os.path.join(tmpdir, "AppData", "Local", "Roblox", "Versions")):
+                found = find_studio_mcp_path()
+                self.assertIsNotNone(found)
+                self.assertEqual(os.path.abspath(found), os.path.abspath(exe_path))
+
 
 if __name__ == "__main__":
     unittest.main()
