@@ -170,6 +170,114 @@ class TestStudioMCPBridge(unittest.TestCase):
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
 
+    def test_read_from_proc_id_matching_and_buffering(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+
+        resps = [
+            json.dumps({"jsonrpc": "2.0", "id": "req_2", "result": {"data": 2}}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "id": "req_1", "result": {"data": 1}}) + "\n",
+        ]
+        mock_proc.stdout.readline.side_effect = resps
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+
+        # Asking for req_1 will encounter req_2 first, buffer req_2, and return req_1
+        got_1 = bridge.read_from_proc(expected_id="req_1")
+        self.assertEqual(got_1["id"], "req_1")
+        self.assertIn("req_2", bridge.response_buffer)
+
+        # Asking for req_2 will return directly from response_buffer
+        got_2 = bridge.read_from_proc(expected_id="req_2")
+        self.assertEqual(got_2["id"], "req_2")
+        self.assertNotIn("req_2", bridge.response_buffer)
+
+    def test_read_from_proc_server_notification(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+
+        resps = [
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "id": "req_1", "result": {}}) + "\n",
+        ]
+        mock_proc.stdout.readline.side_effect = resps
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+
+        with patch("sys.stdout.write") as mock_stdout_write:
+            got = bridge.read_from_proc(expected_id="req_1")
+            self.assertEqual(got["id"], "req_1")
+            mock_stdout_write.assert_called()
+            written = "".join(call.args[0] for call in mock_stdout_write.call_args_list)
+            self.assertIn("notifications/tools/list_changed", written)
+
+    def test_handle_batch_message(self):
+        bridge = StudioMCPBridge()
+
+        # Batch with initialize and ping
+        reqs = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+            {"jsonrpc": "2.0", "id": 2, "method": "ping"}
+        ]
+
+        bridge.init_res = {"result": {"protocolVersion": "2024-11-05"}}
+        resps = bridge.handle_message(reqs)
+        self.assertIsInstance(resps, list)
+        self.assertEqual(len(resps), 2)
+        self.assertEqual(resps[0]["id"], 1)
+        self.assertEqual(resps[1]["id"], 2)
+
+    def test_ensure_process_running_auto_restarts(self):
+        bridge = StudioMCPBridge(studio_mcp_path="/fake/StudioMCP.exe")
+
+        dead_proc = MagicMock()
+        dead_proc.poll.return_value = 1  # Process terminated
+        bridge.proc = dead_proc
+
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc", return_value={"result": {}}) as mock_init:
+            ok = bridge.ensure_process_running()
+            self.assertTrue(ok)
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+
+    def test_tools_call_retry_on_disconnection(self):
+        bridge = StudioMCPBridge()
+        bridge.active_studio_set = True
+
+        not_connected_resp = {
+            "jsonrpc": "2.0",
+            "id": 10,
+            "result": {
+                "isError": True,
+                "content": [{"type": "text", "text": "Not connected to Studio"}]
+            }
+        }
+        success_resp = {
+            "jsonrpc": "2.0",
+            "id": 10,
+            "result": {
+                "isError": False,
+                "content": [{"type": "text", "text": "OK"}]
+            }
+        }
+
+        read_responses = [not_connected_resp, success_resp]
+
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", side_effect=read_responses), \
+             patch.object(bridge, "ensure_active_studio", return_value=True) as mock_ensure:
+
+            req = {
+                "jsonrpc": "2.0",
+                "id": 10,
+                "method": "tools/call",
+                "params": {"name": "run_command", "arguments": {}}
+            }
+            res = bridge.handle_message(req)
+            self.assertEqual(res, success_resp)
+            mock_ensure.assert_called()
+
 
 if __name__ == "__main__":
     unittest.main()
