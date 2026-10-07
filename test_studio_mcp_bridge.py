@@ -170,6 +170,79 @@ class TestStudioMCPBridge(unittest.TestCase):
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
 
+    def test_read_response_for_id_out_of_order(self):
+        bridge = StudioMCPBridge()
+        msg1 = {"jsonrpc": "2.0", "id": 1, "result": "res1"}
+        msg2 = {"jsonrpc": "2.0", "id": 2, "result": "res2"}
+
+        with patch.object(bridge, "read_from_proc", side_effect=[msg2, msg1]):
+            # Request id=1 first, while msg2 arrives first
+            resp1 = bridge.read_response_for_id(1)
+            self.assertEqual(resp1, msg1)
+            self.assertIn(2, bridge.pending_responses)
+            self.assertEqual(bridge.pending_responses[2], msg2)
+
+            # Request id=2, should be retrieved from pending_responses without calling read_from_proc again
+            with patch.object(bridge, "read_from_proc", side_effect=AssertionError("Should not read")):
+                resp2 = bridge.read_response_for_id(2)
+                self.assertEqual(resp2, msg2)
+                self.assertNotIn(2, bridge.pending_responses)
+
+    def test_ensure_proc_running_auto_recovery(self):
+        bridge = StudioMCPBridge()
+        mock_dead_proc = MagicMock()
+        mock_dead_proc.poll.return_value = 1
+        bridge.proc = mock_dead_proc
+
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            ret = bridge.ensure_proc_running()
+            self.assertTrue(ret)
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+
+    def test_handle_message_invalid_payload_error(self):
+        bridge = StudioMCPBridge()
+        resp = bridge.handle_message("not a dict request")
+        self.assertIsInstance(resp, dict)
+        self.assertEqual(resp["error"]["code"], -32600)
+        self.assertIn("Invalid Request", resp["error"]["message"])
+
+    def test_tool_call_retry_on_not_connected(self):
+        bridge = StudioMCPBridge()
+        bridge.active_studio_set = True
+
+        not_connected_resp = {
+            "jsonrpc": "2.0",
+            "id": 99,
+            "result": {
+                "isError": True,
+                "content": [{"type": "text", "text": "Not connected to Studio"}]
+            }
+        }
+        success_resp = {
+            "jsonrpc": "2.0",
+            "id": 99,
+            "result": {
+                "isError": False,
+                "content": [{"type": "text", "text": "Success"}]
+            }
+        }
+
+        with patch.object(bridge, "ensure_active_studio") as mock_ensure, \
+             patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_response_for_id", side_effect=[not_connected_resp, success_resp]):
+            req = {
+                "jsonrpc": "2.0",
+                "id": 99,
+                "method": "tools/call",
+                "params": {"name": "execute_luau", "arguments": {}}
+            }
+            resp = bridge.handle_message(req)
+            self.assertEqual(resp["id"], 99)
+            self.assertFalse(resp["result"]["isError"])
+            self.assertEqual(mock_ensure.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
