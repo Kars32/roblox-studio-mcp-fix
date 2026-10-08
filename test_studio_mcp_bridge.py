@@ -26,7 +26,7 @@ class TestStudioMCPBridge(unittest.TestCase):
             os.makedirs(v2)
 
             exe1 = os.path.join(v1, "StudioMCP.exe")
-            exe2 = os.path.join(v2, "StudioMCP.exe")
+            exe2 = os.path.join(v2, "studiomcp.exe")
 
             with open(exe1, "w") as f:
                 f.write("v1")
@@ -169,6 +169,59 @@ class TestStudioMCPBridge(unittest.TestCase):
         bridge.close()
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
+
+    def test_ensure_active_studio_set_error_res(self):
+        bridge = StudioMCPBridge()
+        list_res = {
+            "jsonrpc": "2.0",
+            "id": "__bridge_tool_list_0",
+            "result": {
+                "content": [{"type": "text", "text": json.dumps({"studios": [{"id": "s1"}]})}]
+            }
+        }
+        set_error_res = {
+            "jsonrpc": "2.0",
+            "id": "__bridge_tool_set_0",
+            "error": {"code": -32603, "message": "Failed"}
+        }
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", side_effect=[list_res, set_error_res]):
+            success = bridge.ensure_active_studio()
+            self.assertFalse(success)
+            self.assertFalse(bridge.active_studio_set)
+
+    def test_read_from_proc_forwards_notifications(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        notification_json = json.dumps({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}) + "\n"
+        response_json = json.dumps({"jsonrpc": "2.0", "id": "req_1", "result": {}}) + "\n"
+        mock_proc.stdout.readline.side_effect = [notification_json, response_json]
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            res = bridge.read_from_proc(expected_id="req_1")
+            self.assertEqual(res["id"], "req_1")
+            self.assertIn("notifications/tools/list_changed", mock_stdout.getvalue())
+
+    def test_handle_message_non_dict_request(self):
+        bridge = StudioMCPBridge()
+        resp = bridge.handle_message("not a dict")
+        self.assertIsNotNone(resp)
+        self.assertIn("error", resp)
+        self.assertEqual(resp["error"]["code"], -32600)
+
+    def test_ensure_process_running_respawns_dead_process(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1  # Dead
+        bridge = StudioMCPBridge(proc=mock_proc)
+        bridge.active_studio_set = True
+
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            bridge.ensure_process_running()
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+            self.assertFalse(bridge.active_studio_set)
 
 
 if __name__ == "__main__":
