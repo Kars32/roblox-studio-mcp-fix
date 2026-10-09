@@ -36,7 +36,7 @@ class TestStudioMCPBridge(unittest.TestCase):
             os.utime(exe1, (1000.0, 1000.0))
             os.utime(exe2, (2000.0, 2000.0))
 
-            with patch("os.path.expandvars", return_value=tmpdir):
+            with patch("os.path.expandvars", side_effect=lambda base: tmpdir if base == r"%LOCALAPPDATA%\Roblox\Versions" else base):
                 with patch.dict(os.environ, {}, clear=True):
                     found = find_studio_mcp_path()
                     self.assertEqual(os.path.abspath(found), os.path.abspath(exe2))
@@ -58,7 +58,7 @@ class TestStudioMCPBridge(unittest.TestCase):
 
     def test_handle_message_initialize(self):
         bridge = StudioMCPBridge()
-        bridge.init_res = {"result": {"serverInfo": {"name": "RobloxStudio", "version": "1.2.0"}}}
+        bridge.init_res = {"result": {"serverInfo": {"name": "RobloxStudio", "version": "1.3.0"}}}
         req = {"jsonrpc": "2.0", "id": 1, "method": "initialize"}
         resp = bridge.handle_message(req)
         self.assertEqual(resp["id"], 1)
@@ -67,7 +67,7 @@ class TestStudioMCPBridge(unittest.TestCase):
     def test_handle_message_server_discover(self):
         bridge = StudioMCPBridge()
         with patch.object(bridge, "send_to_proc", return_value=True), \
-             patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": "list_discover", "result": {"tools": [{"name": "test_tool"}]}}):
+             patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": "list_discover_2", "result": {"tools": [{"name": "test_tool"}]}}):
             req = {"jsonrpc": "2.0", "id": 2, "method": "server/discover"}
             resp = bridge.handle_message(req)
             self.assertEqual(resp["id"], 2)
@@ -80,7 +80,8 @@ class TestStudioMCPBridge(unittest.TestCase):
         mock_proc.poll.return_value = None
 
         bridge = StudioMCPBridge(proc=mock_proc)
-        with patch.object(bridge, "read_from_proc") as mock_read:
+        with patch.object(bridge, "read_from_proc") as mock_read, \
+             patch.object(bridge, "ensure_process_running"):
             notification = {"jsonrpc": "2.0", "method": "custom/notify", "params": {"data": 123}}
             resp = bridge.handle_message(notification)
             self.assertIsNone(resp)
@@ -169,6 +170,40 @@ class TestStudioMCPBridge(unittest.TestCase):
         bridge.close()
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
+
+    def test_batch_request_handling(self):
+        bridge = StudioMCPBridge()
+        bridge.init_res = {"result": {"serverInfo": {"name": "RobloxStudio", "version": "1.3.0"}}}
+        batch_req = [
+            {"jsonrpc": "2.0", "id": 101, "method": "ping"},
+            {"jsonrpc": "2.0", "id": 102, "method": "initialize"}
+        ]
+        resps = bridge.handle_message(batch_req)
+        self.assertIsInstance(resps, list)
+        self.assertEqual(len(resps), 2)
+        self.assertEqual(resps[0]["id"], 101)
+        self.assertEqual(resps[1]["id"], 102)
+
+    def test_read_from_proc_expected_id_buffering(self):
+        bridge = StudioMCPBridge()
+        msg_other = {"jsonrpc": "2.0", "id": 999, "result": {"other": True}}
+        msg_expected = {"jsonrpc": "2.0", "id": 100, "result": {"target": True}}
+
+        bridge.response_queue.put(msg_other)
+        bridge.response_queue.put(msg_expected)
+
+        res = bridge.read_from_proc(expected_id=100, timeout=1.0)
+        self.assertEqual(res["id"], 100)
+        self.assertIn(999, bridge.pending_responses)
+
+        res_other = bridge.read_from_proc(expected_id=999, timeout=1.0)
+        self.assertEqual(res_other["id"], 999)
+        self.assertNotIn(999, bridge.pending_responses)
+
+    def test_read_from_proc_timeout(self):
+        bridge = StudioMCPBridge()
+        res = bridge.read_from_proc(expected_id=500, timeout=0.1)
+        self.assertIsNone(res)
 
 
 if __name__ == "__main__":

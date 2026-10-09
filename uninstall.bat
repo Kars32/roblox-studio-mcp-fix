@@ -18,7 +18,12 @@ if exist "%TARGET_DIR%\mcp.bat.backup" (
     del /f /q "%TARGET_DIR%\mcp.bat.backup"
     echo Restored original mcp.bat from backup
 ) else (
-    echo [NOTICE] Backup file mcp.bat.backup not found. Left existing mcp.bat in place.
+    if exist "%TARGET_DIR%\mcp.bat" (
+        del /f /q "%TARGET_DIR%\mcp.bat"
+        echo Removed mcp.bat because backup was not found
+    ) else (
+        echo [NOTICE] Backup file mcp.bat.backup not found.
+    )
 )
 
 echo.
