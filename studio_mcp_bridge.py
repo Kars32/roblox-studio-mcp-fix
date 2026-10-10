@@ -74,9 +74,32 @@ class StudioMCPBridge:
             bufsize=1
         )
 
+    def restart_process(self):
+        if getattr(self, "_restarting", False):
+            return False
+        self._restarting = True
+        self.active_studio_set = False
+        try:
+            self.close()
+        except Exception:
+            pass
+        try:
+            self.start_process()
+            res = self.init_proc()
+            return res is not None
+        except Exception:
+            return False
+        finally:
+            self._restarting = False
+
     def send_to_proc(self, msg):
+        if not self.proc or self.proc.poll() is not None:
+            if not self.restart_process():
+                return False
+
         if not self.proc or not self.proc.stdin or self.proc.poll() is not None:
             return False
+
         payload = json.dumps(msg) + "\n"
         try:
             self.proc.stdin.write(payload)
@@ -129,18 +152,22 @@ class StudioMCPBridge:
                 "params": {"name": name, "arguments": args}
             }):
                 return None
-            res = self.read_from_proc()
-            if res and isinstance(res, dict) and res.get("id") == req_id:
-                if "result" in res:
-                    content = res["result"].get("content", [])
-                    is_error = res["result"].get("isError", False)
-                    if is_error and isinstance(content, list) and len(content) > 0:
-                        err_text = content[0].get("text", "")
-                        if "Not connected" in err_text or "No active studio" in err_text:
-                            self.active_studio_set = False
-                            time.sleep(0.3)
-                            continue
-                return res
+
+            while True:
+                res = self.read_from_proc()
+                if res is None:
+                    break
+                if isinstance(res, dict) and res.get("id") == req_id:
+                    if "result" in res:
+                        content = res["result"].get("content", [])
+                        is_error = res["result"].get("isError", False)
+                        if is_error and isinstance(content, list) and len(content) > 0:
+                            err_text = content[0].get("text", "")
+                            if "Not connected" in err_text or "No active studio" in err_text:
+                                self.active_studio_set = False
+                                time.sleep(0.3)
+                                break
+                    return res
             time.sleep(0.2)
         return None
 
@@ -153,8 +180,11 @@ class StudioMCPBridge:
                 content = res["result"].get("content", [])
                 if content and isinstance(content, list) and len(content) > 0:
                     txt = content[0].get("text", "{}")
-                    data = json.loads(txt)
-                    studios = data.get("studios", [])
+                    try:
+                        data = json.loads(txt)
+                    except (json.JSONDecodeError, TypeError):
+                        return False
+                    studios = data.get("studios", []) if isinstance(data, dict) else []
                     if studios and isinstance(studios, list) and len(studios) > 0:
                         sid = studios[0].get("id")
                         if sid:
@@ -192,9 +222,6 @@ class StudioMCPBridge:
                 "id": req_id,
                 "result": init_result
             }
-
-        elif method == "notifications/initialized":
-            return None
 
         elif method == "server/discover":
             if self.send_to_proc({

@@ -162,6 +162,62 @@ class TestStudioMCPBridge(unittest.TestCase):
             self.assertIn("error", resp)
             self.assertEqual(resp["error"]["code"], -32603)
 
+    def test_call_proc_tool_matching_response(self):
+        bridge = StudioMCPBridge()
+        # Mock read_from_proc to return a mismatched message first, then the matching message
+        responses = [
+            {"jsonrpc": "2.0", "id": "other_id", "result": {}},
+            {"jsonrpc": "2.0", "id": "__bridge_tool_test_0", "result": {"content": [{"text": "ok"}]}}
+        ]
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", side_effect=responses):
+            res = bridge.call_proc_tool("some_tool", {}, "test")
+            self.assertIsNotNone(res)
+            self.assertEqual(res["id"], "__bridge_tool_test_0")
+
+    def test_ensure_active_studio_invalid_json(self):
+        bridge = StudioMCPBridge()
+        bad_resp = {
+            "jsonrpc": "2.0",
+            "id": "__bridge_tool_list_0",
+            "result": {
+                "content": [{"type": "text", "text": "invalid json string {"}]
+            }
+        }
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", return_value=bad_resp):
+            success = bridge.ensure_active_studio()
+            self.assertFalse(success)
+
+    def test_handle_message_unknown_method(self):
+        bridge = StudioMCPBridge()
+        req = {"jsonrpc": "2.0", "id": 99, "method": "unknown_method"}
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": 99, "result": {"custom": "data"}}):
+            resp = bridge.handle_message(req)
+            self.assertEqual(resp["id"], 99)
+            self.assertEqual(resp["result"]["custom"], "data")
+
+    def test_auto_restart_process(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1  # Process exited
+        bridge = StudioMCPBridge(proc=mock_proc)
+
+        with patch.object(bridge, "restart_process", return_value=True) as mock_restart:
+            # Re-mock proc after restart
+            new_mock_proc = MagicMock()
+            new_mock_proc.poll.return_value = None
+            new_mock_proc.stdin = io.StringIO()
+
+            def side_effect_restart():
+                bridge.proc = new_mock_proc
+                return True
+
+            mock_restart.side_effect = side_effect_restart
+            sent = bridge.send_to_proc({"jsonrpc": "2.0", "id": 1, "method": "ping"})
+            self.assertTrue(sent)
+            mock_restart.assert_called_once()
+
     def test_close_teardown(self):
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
