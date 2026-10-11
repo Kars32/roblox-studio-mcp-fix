@@ -18,7 +18,13 @@ if exist "%TARGET_DIR%\mcp.bat.backup" (
     del /f /q "%TARGET_DIR%\mcp.bat.backup"
     echo Restored original mcp.bat from backup
 ) else (
-    echo [NOTICE] Backup file mcp.bat.backup not found. Left existing mcp.bat in place.
+    echo [NOTICE] Backup file mcp.bat.backup not found.
+    echo Searching for StudioMCP.exe to clean up leftover bridge runner in mcp.bat...
+    findstr /i "studio_mcp_bridge.py" "%TARGET_DIR%\mcp.bat" >nul 2>&1
+    if !ERRORLEVEL! equ 0 (
+        del /f /q "%TARGET_DIR%\mcp.bat"
+        echo Removed bridge runner mcp.bat. Roblox Studio will recreate default mcp.bat on next start or update.
+    )
 )
 
 echo.

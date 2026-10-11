@@ -20,8 +20,9 @@ class TestStudioMCPBridge(unittest.TestCase):
 
     def test_find_studio_mcp_path_mtime_sorting(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            v1 = os.path.join(tmpdir, "version-1")
-            v2 = os.path.join(tmpdir, "version-2")
+            versions = os.path.join(tmpdir, "Roblox", "Versions")
+            v1 = os.path.join(versions, "version-1")
+            v2 = os.path.join(versions, "version-2")
             os.makedirs(v1)
             os.makedirs(v2)
 
@@ -36,10 +37,95 @@ class TestStudioMCPBridge(unittest.TestCase):
             os.utime(exe1, (1000.0, 1000.0))
             os.utime(exe2, (2000.0, 2000.0))
 
-            with patch("os.path.expandvars", return_value=tmpdir):
-                with patch.dict(os.environ, {}, clear=True):
-                    found = find_studio_mcp_path()
-                    self.assertEqual(os.path.abspath(found), os.path.abspath(exe2))
+            with patch.dict(os.environ, {"LOCALAPPDATA": tmpdir}, clear=True):
+                found = find_studio_mcp_path()
+                self.assertIsNotNone(found)
+                self.assertEqual(os.path.abspath(found), os.path.abspath(exe2))
+
+    def test_find_studio_mcp_path_case_insensitive(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            v1 = os.path.join(tmpdir, "Roblox", "Versions", "version-lowercase")
+            os.makedirs(v1)
+            exe_lower = os.path.join(v1, "studiomcp.exe")
+            with open(exe_lower, "w") as f:
+                f.write("lower")
+
+            with patch.dict(os.environ, {"LOCALAPPDATA": tmpdir}, clear=True):
+                found = find_studio_mcp_path()
+                self.assertIsNotNone(found)
+                self.assertEqual(os.path.abspath(found), os.path.abspath(exe_lower))
+
+    def test_response_id_correlation_and_out_of_order(self):
+        bridge = StudioMCPBridge()
+        responses = [
+            {"jsonrpc": "2.0", "id": "other_id", "result": "other"},
+            {"jsonrpc": "2.0", "id": "target_id", "result": "target"},
+        ]
+        with patch.object(bridge, "read_from_proc", side_effect=responses):
+            res = bridge.read_response_for_id("target_id")
+            self.assertEqual(res["result"], "target")
+            self.assertIn("other_id", bridge.pending_responses)
+
+            cached_other = bridge.read_response_for_id("other_id")
+            self.assertEqual(cached_other["result"], "other")
+
+    def test_notification_forwarded_during_response_wait(self):
+        bridge = StudioMCPBridge()
+        responses = [
+            {"jsonrpc": "2.0", "method": "notifications/tools_changed", "params": {}},
+            {"jsonrpc": "2.0", "id": "req_1", "result": "ok"},
+        ]
+        out_capture = io.StringIO()
+        with patch.object(bridge, "read_from_proc", side_effect=responses), \
+             patch("sys.stdout", out_capture):
+            res = bridge.read_response_for_id("req_1")
+            self.assertEqual(res["result"], "ok")
+            written = out_capture.getvalue()
+            self.assertIn("notifications/tools_changed", written)
+
+    def test_subprocess_auto_reconnect(self):
+        mock_proc_dead = MagicMock()
+        mock_proc_dead.poll.return_value = 1
+
+        bridge = StudioMCPBridge(proc=mock_proc_dead)
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            # Simulate start_process creating a healthy process
+            def side_effect_start():
+                bridge.proc = MagicMock()
+                bridge.proc.poll.return_value = None
+
+            mock_start.side_effect = side_effect_start
+            running = bridge.ensure_process_running()
+            self.assertTrue(running)
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+
+    def test_run_loop_handles_eof_and_closed_stdin(self):
+        bridge = StudioMCPBridge()
+        with patch("sys.stdin.readline", side_effect=["", OSError("Closed")]):
+            # Should exit cleanly without raising unhandled exception
+            bridge.run()
+
+    def test_is_studio_disconnected_error_detection(self):
+        err_response_1 = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32000, "message": "No active studio session bound"}
+        }
+        err_response_2 = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "isError": True,
+                "content": [
+                    {"type": "text", "text": "Some preamble"},
+                    {"type": "text", "text": "Not connected to Roblox Studio"}
+                ]
+            }
+        }
+        self.assertTrue(studio_mcp_bridge._is_studio_disconnected_error(err_response_1))
+        self.assertTrue(studio_mcp_bridge._is_studio_disconnected_error(err_response_2))
 
     def test_init_proc(self):
         mock_proc = MagicMock()
@@ -47,7 +133,7 @@ class TestStudioMCPBridge(unittest.TestCase):
         mock_proc.poll.return_value = None
 
         bridge = StudioMCPBridge(proc=mock_proc)
-        with patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": "__bridge_init__", "result": {"protocolVersion": "2024-11-05"}}):
+        with patch.object(bridge, "read_response_for_id", return_value={"jsonrpc": "2.0", "id": "__bridge_init__", "result": {"protocolVersion": "2024-11-05"}}):
             res = bridge.init_proc()
             self.assertIsNotNone(res)
             self.assertEqual(bridge.init_res["result"]["protocolVersion"], "2024-11-05")
