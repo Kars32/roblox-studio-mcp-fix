@@ -13,7 +13,7 @@ from studio_mcp_bridge import StudioMCPBridge, find_studio_mcp_path, reconfigure
 class TestStudioMCPBridge(unittest.TestCase):
 
     def test_find_studio_mcp_path_env_var(self):
-        with patch.dict(os.environ, {"STUDIO_MCP_PATH": "/custom/path/StudioMCP.exe"}):
+        with patch.dict(os.environ, {"STUDIO_MCP_PATH": ' "/custom/path/StudioMCP.exe" '}):
             with patch("os.path.isfile", return_value=True):
                 path = find_studio_mcp_path()
                 self.assertEqual(path, "/custom/path/StudioMCP.exe")
@@ -169,6 +169,31 @@ class TestStudioMCPBridge(unittest.TestCase):
         bridge.close()
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
+
+    def test_handle_batch_request(self):
+        bridge = StudioMCPBridge()
+        bridge.init_res = {"result": {"serverInfo": {"name": "RobloxStudio", "version": "1.2.0"}}}
+        batch_req = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+            {"jsonrpc": "2.0", "id": 2, "method": "ping"}
+        ]
+        resp = bridge.handle_message(batch_req)
+        self.assertIsInstance(resp, list)
+        self.assertEqual(len(resp), 2)
+        self.assertEqual(resp[0]["id"], 1)
+        self.assertEqual(resp[1]["id"], 2)
+
+    def test_process_auto_recovery(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1  # Exited
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            bridge.ensure_process_running()
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+            self.assertFalse(bridge.active_studio_set)
 
 
 if __name__ == "__main__":
