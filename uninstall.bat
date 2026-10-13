@@ -18,7 +18,20 @@ if exist "%TARGET_DIR%\mcp.bat.backup" (
     del /f /q "%TARGET_DIR%\mcp.bat.backup"
     echo Restored original mcp.bat from backup
 ) else (
-    echo [NOTICE] Backup file mcp.bat.backup not found. Left existing mcp.bat in place.
+    echo [NOTICE] Backup file mcp.bat.backup not found. Restoring standard mcp.bat execution...
+    (
+        echo @echo off
+        echo setlocal
+        echo set "B=%%~dp0"
+        echo if exist "%%B%%\..\StudioMCP.exe" ^(
+        echo     "%%B%%\..\StudioMCP.exe" %%*
+        echo ^) else if exist "%%B%%\StudioMCP.exe" ^(
+        echo     "%%B%%\StudioMCP.exe" %%*
+        echo ^) else ^(
+        echo     echo Error: StudioMCP.exe not found.
+        echo     exit /b 1
+        echo ^)
+    ) > "%TARGET_DIR%\mcp.bat"
 )
 
 echo.

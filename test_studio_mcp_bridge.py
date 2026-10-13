@@ -7,10 +7,29 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import studio_mcp_bridge
-from studio_mcp_bridge import StudioMCPBridge, find_studio_mcp_path, reconfigure_io
+from studio_mcp_bridge import (
+    StudioMCPBridge,
+    find_studio_mcp_path,
+    reconfigure_io,
+    extract_text_from_content,
+)
 
 
 class TestStudioMCPBridge(unittest.TestCase):
+
+    def test_extract_text_from_content(self):
+        self.assertEqual(extract_text_from_content("plain text"), "plain text")
+        self.assertEqual(extract_text_from_content({"text": "dict text"}), "dict text")
+        self.assertEqual(
+            extract_text_from_content([{"text": "line1"}, {"text": "line2"}]),
+            "line1\nline2"
+        )
+        self.assertEqual(
+            extract_text_from_content(["str1", {"text": "str2"}, 123]),
+            "str1\nstr2\n123"
+        )
+        self.assertEqual(extract_text_from_content(None), "")
+        self.assertEqual(extract_text_from_content([]), "")
 
     def test_find_studio_mcp_path_env_var(self):
         with patch.dict(os.environ, {"STUDIO_MCP_PATH": "/custom/path/StudioMCP.exe"}):
@@ -26,7 +45,7 @@ class TestStudioMCPBridge(unittest.TestCase):
             os.makedirs(v2)
 
             exe1 = os.path.join(v1, "StudioMCP.exe")
-            exe2 = os.path.join(v2, "StudioMCP.exe")
+            exe2 = os.path.join(v2, "studiomcp.exe")
 
             with open(exe1, "w") as f:
                 f.write("v1")
@@ -88,6 +107,33 @@ class TestStudioMCPBridge(unittest.TestCase):
 
         written = mock_proc.stdin.getvalue()
         self.assertIn('"method": "custom/notify"', written)
+
+    def test_read_from_proc_forwards_notifications(self):
+        lines = [
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "id": "target_id", "result": {"ok": True}}) + "\n"
+        ]
+        mock_proc = MagicMock()
+        mock_proc.stdout.readline.side_effect = lines
+        mock_proc.poll.return_value = None
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            res = bridge.read_from_proc(expected_id="target_id")
+            self.assertEqual(res["id"], "target_id")
+            self.assertIn("notifications/tools/list_changed", mock_stdout.getvalue())
+
+    def test_ensure_proc_running_restarts_dead_proc(self):
+        bridge = StudioMCPBridge()
+        dead_proc = MagicMock()
+        dead_proc.poll.return_value = 1
+        bridge.proc = dead_proc
+
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            bridge.ensure_proc_running()
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
 
     def test_ensure_active_studio_success(self):
         bridge = StudioMCPBridge()
