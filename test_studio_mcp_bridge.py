@@ -118,6 +118,78 @@ class TestStudioMCPBridge(unittest.TestCase):
             self.assertTrue(success)
             self.assertTrue(bridge.active_studio_set)
 
+    def test_ensure_active_studio_zero_id(self):
+        bridge = StudioMCPBridge()
+
+        mock_responses = [
+            {
+                "jsonrpc": "2.0",
+                "id": "__bridge_tool_list_0",
+                "result": {
+                    "content": [{"type": "text", "text": json.dumps({"studios": [{"id": 0}]})}]
+                }
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "__bridge_tool_set_0",
+                "result": {
+                    "content": [{"type": "text", "text": "Active studio set"}],
+                    "isError": False
+                }
+            }
+        ]
+
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", side_effect=mock_responses):
+            success = bridge.ensure_active_studio()
+            self.assertTrue(success)
+            self.assertTrue(bridge.active_studio_set)
+
+    def test_read_from_proc_expected_id_filtering(self):
+        mock_proc = MagicMock()
+        stdout_data = (
+            json.dumps({"jsonrpc": "2.0", "id": "other_id", "result": {}}) + "\n" +
+            json.dumps({"jsonrpc": "2.0", "id": "target_id", "result": {"success": True}}) + "\n"
+        )
+        mock_proc.stdout = io.StringIO(stdout_data)
+        mock_proc.poll.return_value = None
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        res = bridge.read_from_proc(expected_id="target_id")
+        self.assertEqual(res["id"], "target_id")
+        self.assertEqual(res["result"]["success"], True)
+
+    def test_ensure_proc_running_auto_recovery(self):
+        bridge = StudioMCPBridge()
+        dead_proc = MagicMock()
+        dead_proc.poll.return_value = 1
+        bridge.proc = dead_proc
+
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            alive_proc = MagicMock()
+            alive_proc.poll.return_value = None
+            def side_effect():
+                bridge.proc = alive_proc
+            mock_start.side_effect = side_effect
+
+            is_running = bridge.ensure_proc_running()
+            self.assertTrue(is_running)
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+
+    def test_run_internal_exception_handling(self):
+        bridge = StudioMCPBridge()
+        req_line = json.dumps({"jsonrpc": "2.0", "id": 99, "method": "tools/call", "params": {}})
+
+        with patch("sys.stdin", io.StringIO(req_line + "\n")), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout, \
+             patch.object(bridge, "handle_message", side_effect=RuntimeError("Unexpected error")):
+            bridge.run()
+            output = mock_stdout.getvalue()
+            self.assertIn('"id": 99', output)
+            self.assertIn("Internal bridge error: Unexpected error", output)
+
     def test_ensure_active_studio_empty_content(self):
         bridge = StudioMCPBridge()
         with patch.object(bridge, "send_to_proc", return_value=True), \
