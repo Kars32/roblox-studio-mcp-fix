@@ -16,10 +16,10 @@ if not exist "%TARGET_DIR%" (
 )
 
 :: Check for Python
-where python >nul 2>nul
+python --version >nul 2>&1
 if %ERRORLEVEL% neq 0 (
-    echo [ERROR] Python was not found in your PATH.
-    echo Please install Python 3.8+ and check "Add Python to PATH".
+    echo [ERROR] Python was not found or failed to execute.
+    echo Please install Python 3.8+ and ensure "Add Python to PATH" is checked.
     pause
     exit /b 1
 )
