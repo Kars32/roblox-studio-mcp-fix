@@ -18,6 +18,12 @@ class TestStudioMCPBridge(unittest.TestCase):
                 path = find_studio_mcp_path()
                 self.assertEqual(path, "/custom/path/StudioMCP.exe")
 
+    def test_find_studio_mcp_path_quoted_env_var(self):
+        with patch.dict(os.environ, {"STUDIO_MCP_PATH": '"/custom/path/StudioMCP.exe"'}):
+            with patch("os.path.isfile", return_value=True):
+                path = find_studio_mcp_path()
+                self.assertEqual(path, "/custom/path/StudioMCP.exe")
+
     def test_find_studio_mcp_path_mtime_sorting(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             v1 = os.path.join(tmpdir, "version-1")
@@ -67,7 +73,7 @@ class TestStudioMCPBridge(unittest.TestCase):
     def test_handle_message_server_discover(self):
         bridge = StudioMCPBridge()
         with patch.object(bridge, "send_to_proc", return_value=True), \
-             patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": "list_discover", "result": {"tools": [{"name": "test_tool"}]}}):
+             patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": "__bridge_discover_2", "result": {"tools": [{"name": "test_tool"}]}}):
             req = {"jsonrpc": "2.0", "id": 2, "method": "server/discover"}
             resp = bridge.handle_message(req)
             self.assertEqual(resp["id"], 2)
@@ -88,6 +94,11 @@ class TestStudioMCPBridge(unittest.TestCase):
 
         written = mock_proc.stdin.getvalue()
         self.assertIn('"method": "custom/notify"', written)
+
+    def test_handle_message_invalid_request_type(self):
+        bridge = StudioMCPBridge()
+        resp = bridge.handle_message("not a dict")
+        self.assertEqual(resp["error"]["code"], -32600)
 
     def test_ensure_active_studio_success(self):
         bridge = StudioMCPBridge()
@@ -126,6 +137,14 @@ class TestStudioMCPBridge(unittest.TestCase):
             self.assertFalse(success)
             self.assertFalse(bridge.active_studio_set)
 
+    def test_ensure_active_studio_non_dict_content_item(self):
+        bridge = StudioMCPBridge()
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": "__bridge_tool_list_0", "result": {"content": ["invalid_string_item"]}}):
+            success = bridge.ensure_active_studio()
+            self.assertFalse(success)
+            self.assertFalse(bridge.active_studio_set)
+
     def test_tool_call_not_connected_resets_studio_binding(self):
         bridge = StudioMCPBridge()
         bridge.active_studio_set = True
@@ -151,6 +170,45 @@ class TestStudioMCPBridge(unittest.TestCase):
             resp = bridge.handle_message(req)
             self.assertEqual(resp["id"], 5)
             self.assertFalse(bridge.active_studio_set)
+
+    def test_read_from_proc_target_id_filtering(self):
+        mock_stdout = MagicMock()
+        mock_stdout.readline.side_effect = [
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/some_event"}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "id": "wrong_id", "result": {}}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "id": "target_id", "result": {"success": True}}) + "\n",
+        ]
+        mock_proc = MagicMock()
+        mock_proc.stdout = mock_stdout
+        mock_proc.poll.return_value = None
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        res = bridge.read_from_proc(target_id="target_id")
+        self.assertIsNotNone(res)
+        self.assertEqual(res["id"], "target_id")
+
+    def test_ensure_process_running_auto_restarts_on_crash(self):
+        mock_dead_proc = MagicMock()
+        mock_dead_proc.poll.return_value = 1  # Process terminated
+
+        bridge = StudioMCPBridge(proc=mock_dead_proc)
+        bridge.active_studio_set = True
+
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            mock_alive_proc = MagicMock()
+            mock_alive_proc.poll.return_value = None
+
+            def side_effect():
+                bridge.proc = mock_alive_proc
+
+            mock_start.side_effect = side_effect
+
+            running = bridge.ensure_process_running()
+            self.assertTrue(running)
+            self.assertFalse(bridge.active_studio_set)
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
 
     def test_subprocess_disconnect_returns_jsonrpc_error(self):
         bridge = StudioMCPBridge()
