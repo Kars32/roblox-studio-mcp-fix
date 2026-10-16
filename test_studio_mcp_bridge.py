@@ -170,6 +170,88 @@ class TestStudioMCPBridge(unittest.TestCase):
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
 
+    def test_read_from_proc_expected_id_filtering(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        lines = [
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}),
+            json.dumps({"jsonrpc": "2.0", "id": "wrong_id", "result": {}}),
+            json.dumps({"jsonrpc": "2.0", "id": "target_id", "result": {"data": "ok"}})
+        ]
+        mock_proc.stdout = io.StringIO("\n".join(lines) + "\n")
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        res = bridge.read_from_proc(expected_id="target_id")
+        self.assertIsNotNone(res)
+        self.assertEqual(res.get("id"), "target_id")
+        self.assertEqual(res.get("result", {}).get("data"), "ok")
+
+    def test_ensure_proc_alive_restarts_dead_proc(self):
+        dead_proc = MagicMock()
+        dead_proc.poll.return_value = 1
+
+        new_proc = MagicMock()
+        new_proc.poll.return_value = None
+
+        bridge = StudioMCPBridge(proc=dead_proc)
+        bridge.active_studio_set = True
+
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            def side_effect():
+                bridge.proc = new_proc
+            mock_start.side_effect = side_effect
+
+            alive = bridge.ensure_proc_alive()
+            self.assertTrue(alive)
+            self.assertFalse(bridge.active_studio_set)
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+
+    def test_handle_message_batch_request(self):
+        bridge = StudioMCPBridge()
+        bridge.init_res = {"result": {"serverInfo": {"name": "RobloxStudio"}}}
+
+        batch_req = [
+            {"jsonrpc": "2.0", "id": 100, "method": "initialize"},
+            {"jsonrpc": "2.0", "id": 101, "method": "ping"}
+        ]
+
+        resp = bridge.handle_message(batch_req)
+        self.assertIsInstance(resp, list)
+        self.assertEqual(len(resp), 2)
+        self.assertEqual(resp[0]["id"], 100)
+        self.assertEqual(resp[1]["id"], 101)
+
+    def test_call_proc_tool_retry_and_rebinds(self):
+        bridge = StudioMCPBridge()
+        bridge.active_studio_set = True
+
+        err_resp = {
+            "jsonrpc": "2.0",
+            "id": "__bridge_tool_test_call_0",
+            "result": {
+                "isError": True,
+                "content": [{"type": "text", "text": "No active studio"}]
+            }
+        }
+        ok_resp = {
+            "jsonrpc": "2.0",
+            "id": "__bridge_tool_test_call_1",
+            "result": {
+                "isError": False,
+                "content": [{"type": "text", "text": "Success"}]
+            }
+        }
+
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", side_effect=[err_resp, ok_resp]), \
+             patch.object(bridge, "ensure_active_studio") as mock_ensure, \
+             patch("time.sleep"):
+            res = bridge.call_proc_tool("execute_luau", {"code": "print(1)"}, "test_call")
+            self.assertEqual(res, ok_resp)
+            mock_ensure.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
