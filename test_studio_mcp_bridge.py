@@ -170,6 +170,62 @@ class TestStudioMCPBridge(unittest.TestCase):
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
 
+    def test_read_from_proc_expected_id_filtering(self):
+        bridge = StudioMCPBridge()
+        msg1 = {"jsonrpc": "2.0", "id": "other_id", "result": {}}
+        msg2 = {"jsonrpc": "2.0", "id": "target_id", "result": {"data": "ok"}}
+        bridge.msg_queue.put(msg1)
+        bridge.msg_queue.put(msg2)
+
+        resp = bridge.read_from_proc(expected_id="target_id", timeout=1.0)
+        self.assertEqual(resp, msg2)
+        self.assertEqual(bridge.unmatched_messages, [msg1])
+
+        # Confirm unmatched message can subsequently be retrieved
+        resp_unmatched = bridge.read_from_proc(expected_id="other_id", timeout=1.0)
+        self.assertEqual(resp_unmatched, msg1)
+        self.assertEqual(bridge.unmatched_messages, [])
+
+    def test_read_from_proc_timeout(self):
+        bridge = StudioMCPBridge()
+        resp = bridge.read_from_proc(expected_id="missing", timeout=0.05)
+        self.assertIsNone(resp)
+
+    def test_ensure_proc_alive_restarts_dead_process(self):
+        bridge = StudioMCPBridge()
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1  # Exited
+        bridge.proc = mock_proc
+
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc", return_value={"jsonrpc": "2.0"}) as mock_init:
+            alive = bridge.ensure_proc_alive()
+            self.assertTrue(alive)
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+
+    def test_set_active_studio_tool_call_sets_active_flag(self):
+        bridge = StudioMCPBridge()
+        bridge.active_studio_set = False
+
+        set_resp = {
+            "jsonrpc": "2.0",
+            "id": 15,
+            "result": {"content": [{"type": "text", "text": "Set studio"}]}
+        }
+
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", return_value=set_resp):
+            req = {
+                "jsonrpc": "2.0",
+                "id": 15,
+                "method": "tools/call",
+                "params": {"name": "set_active_studio", "arguments": {"studio_id": "123"}}
+            }
+            resp = bridge.handle_message(req)
+            self.assertEqual(resp["id"], 15)
+            self.assertTrue(bridge.active_studio_set)
+
 
 if __name__ == "__main__":
     unittest.main()
