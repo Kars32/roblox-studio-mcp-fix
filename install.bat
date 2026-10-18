@@ -37,6 +37,8 @@ if exist "%TARGET_DIR%\mcp.bat" (
     ) else (
         echo     Existing backup found at %TARGET_DIR%\mcp.bat.backup
     )
+) else (
+    echo     No existing mcp.bat found; proceeding with fresh installation.
 )
 
 echo [2/3] Installing studio_mcp_bridge.py...

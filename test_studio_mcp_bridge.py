@@ -170,6 +170,70 @@ class TestStudioMCPBridge(unittest.TestCase):
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
 
+    def test_batch_payload_handling(self):
+        bridge = StudioMCPBridge()
+        bridge.init_res = {"result": {"serverInfo": {"name": "RobloxStudio", "version": "1.2.0"}}}
+
+        batch_req = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+            {"jsonrpc": "2.0", "id": 2, "method": "ping"}
+        ]
+
+        resp = bridge.handle_payload(batch_req)
+        self.assertIsInstance(resp, list)
+        self.assertEqual(len(resp), 2)
+        self.assertEqual(resp[0]["id"], 1)
+        self.assertEqual(resp[1]["id"], 2)
+
+    def test_batch_payload_empty_error(self):
+        bridge = StudioMCPBridge()
+        resp = bridge.handle_payload([])
+        self.assertEqual(resp["error"]["code"], -32600)
+
+    def test_explicit_set_active_studio_tool_call(self):
+        bridge = StudioMCPBridge()
+        bridge.active_studio_set = False
+
+        mock_resp = {
+            "jsonrpc": "2.0",
+            "id": 10,
+            "result": {
+                "isError": False,
+                "content": [{"type": "text", "text": "Set studio"}]
+            }
+        }
+
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", return_value=mock_resp):
+            req = {
+                "jsonrpc": "2.0",
+                "id": 10,
+                "method": "tools/call",
+                "params": {"name": "set_active_studio", "arguments": {"studio_id": "s1"}}
+            }
+            resp = bridge.handle_message(req)
+            self.assertEqual(resp["id"], 10)
+            self.assertTrue(bridge.active_studio_set)
+
+    def test_ensure_process_alive_recovery(self):
+        bridge = StudioMCPBridge()
+        dead_proc = MagicMock()
+        dead_proc.poll.return_value = 1
+        bridge.proc = dead_proc
+
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            live_proc = MagicMock()
+            live_proc.poll.return_value = None
+            def side_effect():
+                bridge.proc = live_proc
+            mock_start.side_effect = side_effect
+
+            alive = bridge.ensure_process_alive()
+            self.assertTrue(alive)
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
