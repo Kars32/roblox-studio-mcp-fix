@@ -18,6 +18,26 @@ class TestStudioMCPBridge(unittest.TestCase):
                 path = find_studio_mcp_path()
                 self.assertEqual(path, "/custom/path/StudioMCP.exe")
 
+    def test_find_studio_mcp_path_quoted_env_var(self):
+        with patch.dict(os.environ, {"STUDIO_MCP_PATH": '"/custom/path/StudioMCP.exe"'}):
+            with patch("os.path.isfile", return_value=True):
+                path = find_studio_mcp_path()
+                self.assertEqual(path, "/custom/path/StudioMCP.exe")
+
+    def test_find_studio_mcp_path_fallback_appdata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            versions_dir = os.path.join(tmpdir, "Roblox", "Versions")
+            v1 = os.path.join(versions_dir, "version-1")
+            os.makedirs(v1)
+            exe1 = os.path.join(v1, "StudioMCP.exe")
+            with open(exe1, "w") as f:
+                f.write("v1")
+
+            with patch.dict(os.environ, {"LOCALAPPDATA": tmpdir}, clear=True), \
+                 patch("os.path.expandvars", return_value=r"%LOCALAPPDATA%\Roblox\Versions"):
+                found = find_studio_mcp_path()
+                self.assertEqual(os.path.abspath(found), os.path.abspath(exe1))
+
     def test_find_studio_mcp_path_mtime_sorting(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             v1 = os.path.join(tmpdir, "version-1")
@@ -161,6 +181,88 @@ class TestStudioMCPBridge(unittest.TestCase):
             self.assertEqual(resp["id"], 10)
             self.assertIn("error", resp)
             self.assertEqual(resp["error"]["code"], -32603)
+
+    def test_read_from_proc_expected_id_filtering(self):
+        mock_stdout = io.StringIO(
+            json.dumps({"jsonrpc": "2.0", "id": "other_id", "result": {}}) + "\n" +
+            json.dumps({"jsonrpc": "2.0", "id": "target_id", "result": {"data": "ok"}}) + "\n"
+        )
+        mock_proc = MagicMock()
+        mock_proc.stdout = mock_stdout
+        mock_proc.poll.return_value = None
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        res = bridge.read_from_proc(expected_id="target_id")
+        self.assertIsNotNone(res)
+        self.assertEqual(res["id"], "target_id")
+        self.assertEqual(res["result"]["data"], "ok")
+
+    def test_ensure_proc_alive_auto_reconnect(self):
+        bridge = StudioMCPBridge(studio_mcp_path="/mock/StudioMCP.exe")
+        bridge.proc = None
+
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            bridge.ensure_proc_alive()
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+
+    def test_send_to_proc_retry_on_broken_pipe(self):
+        mock_stdin = MagicMock()
+        mock_stdin.write.side_effect = [BrokenPipeError("pipe closed"), None]
+        mock_proc = MagicMock()
+        mock_proc.stdin = mock_stdin
+        mock_proc.poll.return_value = None
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        with patch.object(bridge, "ensure_proc_alive") as mock_alive:
+            success = bridge.send_to_proc({"jsonrpc": "2.0", "method": "ping"})
+            self.assertTrue(success)
+            self.assertGreaterEqual(mock_alive.call_count, 2)
+
+    def test_tools_call_transparent_retry_on_not_connected(self):
+        bridge = StudioMCPBridge()
+        bridge.active_studio_set = True
+
+        not_connected_resp = {
+            "jsonrpc": "2.0",
+            "id": 100,
+            "result": {
+                "isError": True,
+                "content": [{"type": "text", "text": "Not connected to Studio"}]
+            }
+        }
+        success_resp = {
+            "jsonrpc": "2.0",
+            "id": 100,
+            "result": {
+                "isError": False,
+                "content": [{"type": "text", "text": "Execution successful"}]
+            }
+        }
+
+        with patch.object(bridge, "ensure_active_studio", return_value=True) as mock_ensure, \
+             patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", side_effect=[not_connected_resp, success_resp]):
+            req = {
+                "jsonrpc": "2.0",
+                "id": 100,
+                "method": "tools/call",
+                "params": {"name": "execute_luau", "arguments": {}}
+            }
+            resp = bridge.handle_message(req)
+            self.assertEqual(resp["id"], 100)
+            self.assertFalse(resp["result"]["isError"])
+            mock_ensure.assert_called()
+
+    def test_reconfigure_io(self):
+        with patch("sys.stdin.reconfigure") as mock_stdin_reconfig, \
+             patch("sys.stdout.reconfigure") as mock_stdout_reconfig, \
+             patch("sys.stderr.reconfigure") as mock_stderr_reconfig:
+            reconfigure_io()
+            mock_stdin_reconfig.assert_called_once_with(encoding="utf-8", errors="replace")
+            mock_stdout_reconfig.assert_called_once_with(encoding="utf-8", errors="replace")
+            mock_stderr_reconfig.assert_called_once_with(encoding="utf-8", errors="replace")
 
     def test_close_teardown(self):
         mock_proc = MagicMock()
