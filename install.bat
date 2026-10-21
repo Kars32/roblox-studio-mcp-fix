@@ -15,10 +15,20 @@ if not exist "%TARGET_DIR%" (
     exit /b 1
 )
 
-:: Check for Python
+:: Check for Python or Python launcher (py)
+set "PYTHON_CMD="
 where python >nul 2>nul
-if %ERRORLEVEL% neq 0 (
-    echo [ERROR] Python was not found in your PATH.
+if !ERRORLEVEL! equ 0 (
+    set "PYTHON_CMD=python"
+) else (
+    where py >nul 2>nul
+    if !ERRORLEVEL! equ 0 (
+        set "PYTHON_CMD=py -3"
+    )
+)
+
+if "%PYTHON_CMD%"=="" (
+    echo [ERROR] Neither Python nor 'py' launcher was found in your PATH.
     echo Please install Python 3.8+ and check "Add Python to PATH".
     pause
     exit /b 1

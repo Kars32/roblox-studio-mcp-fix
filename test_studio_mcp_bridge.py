@@ -44,6 +44,7 @@ class TestStudioMCPBridge(unittest.TestCase):
     def test_init_proc(self):
         mock_proc = MagicMock()
         mock_proc.stdin = io.StringIO()
+        mock_proc.stdout = None
         mock_proc.poll.return_value = None
 
         bridge = StudioMCPBridge(proc=mock_proc)
@@ -67,7 +68,7 @@ class TestStudioMCPBridge(unittest.TestCase):
     def test_handle_message_server_discover(self):
         bridge = StudioMCPBridge()
         with patch.object(bridge, "send_to_proc", return_value=True), \
-             patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": "list_discover", "result": {"tools": [{"name": "test_tool"}]}}):
+             patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": "list_discover_2", "result": {"tools": [{"name": "test_tool"}]}}):
             req = {"jsonrpc": "2.0", "id": 2, "method": "server/discover"}
             resp = bridge.handle_message(req)
             self.assertEqual(resp["id"], 2)
@@ -77,6 +78,7 @@ class TestStudioMCPBridge(unittest.TestCase):
     def test_handle_message_notification_does_not_wait(self):
         mock_proc = MagicMock()
         mock_proc.stdin = io.StringIO()
+        mock_proc.stdout = None
         mock_proc.poll.return_value = None
 
         bridge = StudioMCPBridge(proc=mock_proc)
@@ -161,6 +163,44 @@ class TestStudioMCPBridge(unittest.TestCase):
             self.assertEqual(resp["id"], 10)
             self.assertIn("error", resp)
             self.assertEqual(resp["error"]["code"], -32603)
+
+    def test_batch_request(self):
+        bridge = StudioMCPBridge()
+        bridge.init_res = {"result": {"serverInfo": {"name": "RobloxStudio", "version": "1.2.0"}}}
+        batch_req = [
+            {"jsonrpc": "2.0", "id": 101, "method": "ping"},
+            {"jsonrpc": "2.0", "id": 102, "method": "initialize"}
+        ]
+        resps = bridge.handle_message(batch_req)
+        self.assertIsInstance(resps, list)
+        self.assertEqual(len(resps), 2)
+        self.assertEqual(resps[0]["id"], 101)
+        self.assertEqual(resps[1]["id"], 102)
+
+    def test_invalid_request_object(self):
+        bridge = StudioMCPBridge()
+        resp = bridge.handle_message("not_a_dict")
+        self.assertEqual(resp["error"]["code"], -32600)
+
+    def test_empty_batch_request(self):
+        bridge = StudioMCPBridge()
+        resp = bridge.handle_message([])
+        self.assertEqual(resp["error"]["code"], -32600)
+
+    def test_queue_reading_and_unmatched_buffering(self):
+        bridge = StudioMCPBridge()
+        msg1 = {"jsonrpc": "2.0", "id": "other_id", "result": {}}
+        msg2 = {"jsonrpc": "2.0", "id": "target_id", "result": {"data": "ok"}}
+        bridge.msg_queue.put(msg1)
+        bridge.msg_queue.put(msg2)
+
+        ret = bridge.read_from_proc(expected_id="target_id", timeout=1.0)
+        self.assertEqual(ret, msg2)
+        self.assertIn(msg1, bridge.unmatched_responses)
+
+        ret_other = bridge.read_from_proc(expected_id="other_id", timeout=1.0)
+        self.assertEqual(ret_other, msg1)
+        self.assertEqual(len(bridge.unmatched_responses), 0)
 
     def test_close_teardown(self):
         mock_proc = MagicMock()
