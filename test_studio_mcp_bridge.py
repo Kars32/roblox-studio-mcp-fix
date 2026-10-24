@@ -162,6 +162,65 @@ class TestStudioMCPBridge(unittest.TestCase):
             self.assertIn("error", resp)
             self.assertEqual(resp["error"]["code"], -32603)
 
+    def test_read_from_proc_response_matching_and_buffering(self):
+        mock_proc = MagicMock()
+        # Simulate stdout returning response for id 2 before response for id 1
+        lines = [
+            json.dumps({"jsonrpc": "2.0", "id": "req_2", "result": "res_2"}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "id": "req_1", "result": "res_1"}) + "\n"
+        ]
+        mock_proc.stdout.readline.side_effect = lines
+        mock_proc.poll.return_value = None
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        # Read expecting req_1 first; req_2 should be buffered in pending_responses
+        res1 = bridge.read_from_proc(target_id="req_1", timeout=1.0)
+        self.assertEqual(res1["id"], "req_1")
+        self.assertIn("req_2", bridge.pending_responses)
+
+        # Subsequent read for req_2 should retrieve from pending_responses
+        res2 = bridge.read_from_proc(target_id="req_2", timeout=1.0)
+        self.assertEqual(res2["id"], "req_2")
+
+    def test_read_from_proc_server_notification_forwarding(self):
+        mock_proc = MagicMock()
+        lines = [
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/tools/list_changed", "params": {}}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "id": "req_1", "result": "ok"}) + "\n"
+        ]
+        mock_proc.stdout.readline.side_effect = lines
+        mock_proc.poll.return_value = None
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            res = bridge.read_from_proc(target_id="req_1", timeout=1.0)
+            self.assertEqual(res["id"], "req_1")
+            self.assertIn("notifications/tools/list_changed", mock_stdout.getvalue())
+
+    def test_handle_batch_request(self):
+        bridge = StudioMCPBridge()
+        bridge.init_res = {"result": {"serverInfo": {"name": "RobloxStudio", "version": "1.2.0"}}}
+        batch_req = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+            {"jsonrpc": "2.0", "id": 2, "method": "ping"}
+        ]
+        responses = bridge.handle_message(batch_req)
+        self.assertIsInstance(responses, list)
+        self.assertEqual(len(responses), 2)
+        self.assertEqual(responses[0]["id"], 1)
+        self.assertEqual(responses[1]["id"], 2)
+
+    def test_process_auto_restart_on_death(self):
+        mock_dead_proc = MagicMock()
+        mock_dead_proc.poll.return_value = 1  # Dead process
+
+        bridge = StudioMCPBridge(proc=mock_dead_proc)
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            bridge.ensure_proc_running()
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+
     def test_close_teardown(self):
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
