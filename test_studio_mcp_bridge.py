@@ -13,7 +13,7 @@ from studio_mcp_bridge import StudioMCPBridge, find_studio_mcp_path, reconfigure
 class TestStudioMCPBridge(unittest.TestCase):
 
     def test_find_studio_mcp_path_env_var(self):
-        with patch.dict(os.environ, {"STUDIO_MCP_PATH": "/custom/path/StudioMCP.exe"}):
+        with patch.dict(os.environ, {"STUDIO_MCP_PATH": "  \"/custom/path/StudioMCP.exe\"  "}):
             with patch("os.path.isfile", return_value=True):
                 path = find_studio_mcp_path()
                 self.assertEqual(path, "/custom/path/StudioMCP.exe")
@@ -58,7 +58,7 @@ class TestStudioMCPBridge(unittest.TestCase):
 
     def test_handle_message_initialize(self):
         bridge = StudioMCPBridge()
-        bridge.init_res = {"result": {"serverInfo": {"name": "RobloxStudio", "version": "1.2.0"}}}
+        bridge.init_res = {"result": {"serverInfo": {"name": "RobloxStudio", "version": "1.3.0"}}}
         req = {"jsonrpc": "2.0", "id": 1, "method": "initialize"}
         resp = bridge.handle_message(req)
         self.assertEqual(resp["id"], 1)
@@ -67,12 +67,30 @@ class TestStudioMCPBridge(unittest.TestCase):
     def test_handle_message_server_discover(self):
         bridge = StudioMCPBridge()
         with patch.object(bridge, "send_to_proc", return_value=True), \
-             patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": "list_discover", "result": {"tools": [{"name": "test_tool"}]}}):
+             patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": "__discover_2", "result": {"tools": [{"name": "test_tool"}]}}):
             req = {"jsonrpc": "2.0", "id": 2, "method": "server/discover"}
             resp = bridge.handle_message(req)
             self.assertEqual(resp["id"], 2)
             self.assertEqual(len(resp["result"]["tools"]), 1)
             self.assertEqual(resp["result"]["tools"][0]["name"], "test_tool")
+
+    def test_handle_message_batch_request(self):
+        bridge = StudioMCPBridge()
+        bridge.init_res = {"result": {"serverInfo": {"name": "RobloxStudio", "version": "1.3.0"}}}
+        req = [
+            {"jsonrpc": "2.0", "id": 100, "method": "initialize"},
+            {"jsonrpc": "2.0", "id": 101, "method": "ping"}
+        ]
+        resp = bridge.handle_message(req)
+        self.assertIsInstance(resp, list)
+        self.assertEqual(len(resp), 2)
+        self.assertEqual(resp[0]["id"], 100)
+        self.assertEqual(resp[1]["id"], 101)
+
+    def test_handle_message_invalid_type(self):
+        bridge = StudioMCPBridge()
+        resp = bridge.handle_message("invalid_request_string")
+        self.assertEqual(resp["error"]["code"], -32600)
 
     def test_handle_message_notification_does_not_wait(self):
         mock_proc = MagicMock()
@@ -126,7 +144,7 @@ class TestStudioMCPBridge(unittest.TestCase):
             self.assertFalse(success)
             self.assertFalse(bridge.active_studio_set)
 
-    def test_tool_call_not_connected_resets_studio_binding(self):
+    def test_tool_call_retry_on_disconnection(self):
         bridge = StudioMCPBridge()
         bridge.active_studio_set = True
 
@@ -138,10 +156,17 @@ class TestStudioMCPBridge(unittest.TestCase):
                 "content": [{"type": "text", "text": "Not connected to Studio"}]
             }
         }
+        success_resp = {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "result": {
+                "content": [{"type": "text", "text": "Execution successful"}]
+            }
+        }
 
-        with patch.object(bridge, "ensure_active_studio"), \
+        with patch.object(bridge, "ensure_active_studio", return_value=True) as mock_ensure, \
              patch.object(bridge, "send_to_proc", return_value=True), \
-             patch.object(bridge, "read_from_proc", return_value=not_connected_resp):
+             patch.object(bridge, "read_from_proc", side_effect=[not_connected_resp, success_resp]):
             req = {
                 "jsonrpc": "2.0",
                 "id": 5,
@@ -150,7 +175,8 @@ class TestStudioMCPBridge(unittest.TestCase):
             }
             resp = bridge.handle_message(req)
             self.assertEqual(resp["id"], 5)
-            self.assertFalse(bridge.active_studio_set)
+            self.assertEqual(resp["result"]["content"][0]["text"], "Execution successful")
+            mock_ensure.assert_called()
 
     def test_subprocess_disconnect_returns_jsonrpc_error(self):
         bridge = StudioMCPBridge()
