@@ -170,6 +170,54 @@ class TestStudioMCPBridge(unittest.TestCase):
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
 
+    def test_read_from_proc_target_id_filtering(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        # Simulates a stream with notifications or mismatched IDs followed by target response
+        lines = [
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "id": "other_id", "result": {}}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "id": "target_123", "result": {"ok": True}}) + "\n"
+        ]
+        mock_proc.stdout.readline.side_effect = lines
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        res = bridge.read_from_proc(target_id="target_123")
+        self.assertEqual(res, {"jsonrpc": "2.0", "id": "target_123", "result": {"ok": True}})
+
+    def test_handle_message_batch_requests(self):
+        bridge = StudioMCPBridge()
+        bridge.init_res = {"result": {"serverInfo": {"name": "RobloxStudio", "version": "1.2.0"}}}
+        batch_req = [
+            {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            {"jsonrpc": "2.0", "id": 2, "method": "initialize"}
+        ]
+        resps = bridge.handle_message(batch_req)
+        self.assertIsInstance(resps, list)
+        self.assertEqual(len(resps), 2)
+        self.assertEqual(resps[0]["id"], 1)
+        self.assertEqual(resps[1]["id"], 2)
+
+    def test_handle_message_invalid_request_format(self):
+        bridge = StudioMCPBridge()
+        resp = bridge.handle_message("invalid_string_request")
+        self.assertEqual(resp["error"]["code"], -32600)
+
+        empty_batch_resp = bridge.handle_message([])
+        self.assertEqual(empty_batch_resp["error"]["code"], -32600)
+
+    def test_ensure_proc_alive_restarts_dead_process(self):
+        bridge = StudioMCPBridge()
+        dead_proc = MagicMock()
+        dead_proc.poll.return_value = 1  # Process terminated
+        bridge.proc = dead_proc
+
+        with patch.object(bridge, "start_process", return_value=True) as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            bridge.ensure_proc_alive()
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
