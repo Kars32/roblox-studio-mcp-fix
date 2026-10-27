@@ -16,9 +16,19 @@ if exist "%TARGET_DIR%\studio_mcp_bridge.py" (
 if exist "%TARGET_DIR%\mcp.bat.backup" (
     copy /y "%TARGET_DIR%\mcp.bat.backup" "%TARGET_DIR%\mcp.bat" >nul
     del /f /q "%TARGET_DIR%\mcp.bat.backup"
-    echo Restored original mcp.bat from backup
+    echo Restored original mcp.bat from backup.
 ) else (
-    echo [NOTICE] Backup file mcp.bat.backup not found. Left existing mcp.bat in place.
+    if exist "%TARGET_DIR%\mcp.bat" (
+        findstr /i "studio_mcp_bridge.py" "%TARGET_DIR%\mcp.bat" >nul 2>&1
+        if !ERRORLEVEL! equ 0 (
+            del /f /q "%TARGET_DIR%\mcp.bat"
+            echo Removed mcp.bat as no backup was available and it pointed to deleted bridge script.
+        ) else (
+            echo [NOTICE] Backup file mcp.bat.backup not found. Left existing non-bridge mcp.bat in place.
+        )
+    ) else (
+        echo [NOTICE] Backup file mcp.bat.backup not found.
+    )
 )
 
 echo.
