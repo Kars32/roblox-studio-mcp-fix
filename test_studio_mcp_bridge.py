@@ -44,10 +44,11 @@ class TestStudioMCPBridge(unittest.TestCase):
     def test_init_proc(self):
         mock_proc = MagicMock()
         mock_proc.stdin = io.StringIO()
+        mock_proc.stdout = None
         mock_proc.poll.return_value = None
 
         bridge = StudioMCPBridge(proc=mock_proc)
-        with patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": "__bridge_init__", "result": {"protocolVersion": "2024-11-05"}}):
+        with patch.object(bridge, "read_response_for_id", return_value={"jsonrpc": "2.0", "id": "__bridge_init__", "result": {"protocolVersion": "2024-11-05"}}):
             res = bridge.init_proc()
             self.assertIsNotNone(res)
             self.assertEqual(bridge.init_res["result"]["protocolVersion"], "2024-11-05")
@@ -67,7 +68,7 @@ class TestStudioMCPBridge(unittest.TestCase):
     def test_handle_message_server_discover(self):
         bridge = StudioMCPBridge()
         with patch.object(bridge, "send_to_proc", return_value=True), \
-             patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": "list_discover", "result": {"tools": [{"name": "test_tool"}]}}):
+             patch.object(bridge, "read_response_for_id", return_value={"jsonrpc": "2.0", "id": "list_discover", "result": {"tools": [{"name": "test_tool"}]}}):
             req = {"jsonrpc": "2.0", "id": 2, "method": "server/discover"}
             resp = bridge.handle_message(req)
             self.assertEqual(resp["id"], 2)
@@ -77,6 +78,7 @@ class TestStudioMCPBridge(unittest.TestCase):
     def test_handle_message_notification_does_not_wait(self):
         mock_proc = MagicMock()
         mock_proc.stdin = io.StringIO()
+        mock_proc.stdout = None
         mock_proc.poll.return_value = None
 
         bridge = StudioMCPBridge(proc=mock_proc)
@@ -113,7 +115,7 @@ class TestStudioMCPBridge(unittest.TestCase):
         ]
 
         with patch.object(bridge, "send_to_proc", return_value=True), \
-             patch.object(bridge, "read_from_proc", side_effect=mock_responses):
+             patch.object(bridge, "read_response_for_id", side_effect=mock_responses):
             success = bridge.ensure_active_studio()
             self.assertTrue(success)
             self.assertTrue(bridge.active_studio_set)
@@ -121,7 +123,7 @@ class TestStudioMCPBridge(unittest.TestCase):
     def test_ensure_active_studio_empty_content(self):
         bridge = StudioMCPBridge()
         with patch.object(bridge, "send_to_proc", return_value=True), \
-             patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": "__bridge_tool_list_0", "result": {"content": []}}):
+             patch.object(bridge, "read_response_for_id", return_value={"jsonrpc": "2.0", "id": "__bridge_tool_list_0", "result": {"content": []}}):
             success = bridge.ensure_active_studio()
             self.assertFalse(success)
             self.assertFalse(bridge.active_studio_set)
@@ -141,7 +143,7 @@ class TestStudioMCPBridge(unittest.TestCase):
 
         with patch.object(bridge, "ensure_active_studio"), \
              patch.object(bridge, "send_to_proc", return_value=True), \
-             patch.object(bridge, "read_from_proc", return_value=not_connected_resp):
+             patch.object(bridge, "read_response_for_id", return_value=not_connected_resp):
             req = {
                 "jsonrpc": "2.0",
                 "id": 5,
@@ -155,7 +157,7 @@ class TestStudioMCPBridge(unittest.TestCase):
     def test_subprocess_disconnect_returns_jsonrpc_error(self):
         bridge = StudioMCPBridge()
         with patch.object(bridge, "send_to_proc", return_value=True), \
-             patch.object(bridge, "read_from_proc", return_value=None):
+             patch.object(bridge, "read_response_for_id", return_value=None):
             req = {"jsonrpc": "2.0", "id": 10, "method": "tools/list"}
             resp = bridge.handle_message(req)
             self.assertEqual(resp["id"], 10)
@@ -169,6 +171,55 @@ class TestStudioMCPBridge(unittest.TestCase):
         bridge.close()
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
+
+    def test_read_response_for_id_matching(self):
+        bridge = StudioMCPBridge()
+        msg_notification = {"jsonrpc": "2.0", "method": "log", "params": {"msg": "info"}}
+        msg_target = {"jsonrpc": "2.0", "id": "req_123", "result": {"success": True}}
+
+        bridge.stdout_queue.put(msg_notification)
+        bridge.stdout_queue.put(msg_target)
+
+        res = bridge.read_response_for_id("req_123", timeout=1.0)
+        self.assertEqual(res, msg_target)
+
+    def test_read_timeout_handling(self):
+        bridge = StudioMCPBridge()
+        res = bridge.read_response_for_id("non_existent_id", timeout=0.1)
+        self.assertIsNone(res)
+
+    def test_process_auto_restart(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1  # Exited
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            bridge.ensure_process_running()
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+
+    def test_non_dict_content_handling(self):
+        bridge = StudioMCPBridge()
+        bad_content_resp = {
+            "jsonrpc": "2.0",
+            "id": "req_456",
+            "result": {
+                "isError": True,
+                "content": ["string_instead_of_dict"]
+            }
+        }
+        with patch.object(bridge, "ensure_active_studio"), \
+             patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_response_for_id", return_value=bad_content_resp):
+            req = {
+                "jsonrpc": "2.0",
+                "id": "req_456",
+                "method": "tools/call",
+                "params": {"name": "execute_luau", "arguments": {}}
+            }
+            resp = bridge.handle_message(req)
+            self.assertEqual(resp["id"], "req_456")
 
 
 if __name__ == "__main__":
