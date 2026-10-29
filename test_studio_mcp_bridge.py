@@ -18,6 +18,20 @@ class TestStudioMCPBridge(unittest.TestCase):
                 path = find_studio_mcp_path()
                 self.assertEqual(path, "/custom/path/StudioMCP.exe")
 
+    def test_find_studio_mcp_path_case_insensitive(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            v1 = os.path.join(tmpdir, "version-1")
+            os.makedirs(v1)
+            exe1 = os.path.join(v1, "studiomcp.EXE")
+            with open(exe1, "w") as f:
+                f.write("v1")
+
+            with patch("os.path.expandvars", return_value=tmpdir):
+                with patch.dict(os.environ, {}, clear=True):
+                    found = find_studio_mcp_path()
+                    self.assertIsNotNone(found)
+                    self.assertEqual(os.path.abspath(found), os.path.abspath(exe1))
+
     def test_find_studio_mcp_path_mtime_sorting(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             v1 = os.path.join(tmpdir, "version-1")
@@ -56,6 +70,26 @@ class TestStudioMCPBridge(unittest.TestCase):
         self.assertIn('"method": "initialize"', stdin_value)
         self.assertIn('"method": "notifications/initialized"', stdin_value)
 
+    def test_read_from_proc_id_matching(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        # Mock stdout returning mismatched message first, then matching message
+        lines = [
+            json.dumps({"jsonrpc": "2.0", "id": "other_id", "result": "ignored"}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "id": "target_id", "result": "success"}) + "\n"
+        ]
+        mock_proc.stdout.readline.side_effect = lines
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        res = bridge.read_from_proc(expected_id="target_id")
+        self.assertIsNotNone(res)
+        self.assertEqual(res["id"], "target_id")
+
+    def test_handle_message_invalid_non_dict(self):
+        bridge = StudioMCPBridge()
+        resp = bridge.handle_message("not a dict")
+        self.assertEqual(resp["error"]["code"], -32600)
+
     def test_handle_message_initialize(self):
         bridge = StudioMCPBridge()
         bridge.init_res = {"result": {"serverInfo": {"name": "RobloxStudio", "version": "1.2.0"}}}
@@ -67,7 +101,7 @@ class TestStudioMCPBridge(unittest.TestCase):
     def test_handle_message_server_discover(self):
         bridge = StudioMCPBridge()
         with patch.object(bridge, "send_to_proc", return_value=True), \
-             patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": "list_discover", "result": {"tools": [{"name": "test_tool"}]}}):
+             patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": "__bridge_discover__", "result": {"tools": [{"name": "test_tool"}]}}):
             req = {"jsonrpc": "2.0", "id": 2, "method": "server/discover"}
             resp = bridge.handle_message(req)
             self.assertEqual(resp["id"], 2)
@@ -122,6 +156,21 @@ class TestStudioMCPBridge(unittest.TestCase):
         bridge = StudioMCPBridge()
         with patch.object(bridge, "send_to_proc", return_value=True), \
              patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": "__bridge_tool_list_0", "result": {"content": []}}):
+            success = bridge.ensure_active_studio()
+            self.assertFalse(success)
+            self.assertFalse(bridge.active_studio_set)
+
+    def test_ensure_active_studio_malformed_json_content(self):
+        bridge = StudioMCPBridge()
+        malformed_resp = {
+            "jsonrpc": "2.0",
+            "id": "__bridge_tool_list_0",
+            "result": {
+                "content": [{"type": "text", "text": "invalid json string"}]
+            }
+        }
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", return_value=malformed_resp):
             success = bridge.ensure_active_studio()
             self.assertFalse(success)
             self.assertFalse(bridge.active_studio_set)
