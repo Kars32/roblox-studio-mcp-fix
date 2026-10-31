@@ -71,12 +71,12 @@ If you prefer to install manually:
 3. Add the server to your client's MCP configuration (`mcp_config.json`):
    ```json
    {
-     \"mcpServers\": {
-       \"Roblox_Studio\": {
-         \"command\": \"cmd.exe\",
-         \"args\": [
-           \"/c\",
-           \"cd /d %LOCALAPPDATA%\\\\Roblox && .\\\\mcp.bat\"
+     "mcpServers": {
+       "Roblox_Studio": {
+         "command": "cmd.exe",
+         "args": [
+           "/c",
+           "cd /d %LOCALAPPDATA%\\Roblox && .\\mcp.bat"
          ]
        }
      }
