@@ -41,6 +41,19 @@ class TestStudioMCPBridge(unittest.TestCase):
                     found = find_studio_mcp_path()
                     self.assertEqual(os.path.abspath(found), os.path.abspath(exe2))
 
+    def test_find_studio_mcp_path_fallback_when_localappdata_unexpanded(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            versions_dir = os.path.join(tmpdir, "Roblox", "Versions", "version-sub")
+            os.makedirs(versions_dir)
+            exe = os.path.join(versions_dir, "StudioMCP.exe")
+            with open(exe, "w") as f:
+                f.write("exe")
+
+            with patch("os.path.expandvars", return_value=r"%LOCALAPPDATA%\Roblox\Versions"):
+                with patch.dict(os.environ, {"LOCALAPPDATA": tmpdir}, clear=True):
+                    found = find_studio_mcp_path()
+                    self.assertEqual(os.path.abspath(found), os.path.abspath(exe))
+
     def test_init_proc(self):
         mock_proc = MagicMock()
         mock_proc.stdin = io.StringIO()
@@ -118,6 +131,57 @@ class TestStudioMCPBridge(unittest.TestCase):
             self.assertTrue(success)
             self.assertTrue(bridge.active_studio_set)
 
+    def test_ensure_active_studio_zero_id(self):
+        bridge = StudioMCPBridge()
+
+        mock_responses = [
+            {
+                "jsonrpc": "2.0",
+                "id": "__bridge_tool_list_0",
+                "result": {
+                    "content": [{"type": "text", "text": json.dumps({"studios": [{"id": 0}]})}]
+                }
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "__bridge_tool_set_0",
+                "result": {
+                    "content": [{"type": "text", "text": "Active studio set"}],
+                    "isError": False
+                }
+            }
+        ]
+
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", side_effect=mock_responses):
+            success = bridge.ensure_active_studio()
+            self.assertTrue(success)
+            self.assertTrue(bridge.active_studio_set)
+
+    def test_ensure_active_studio_error_response(self):
+        bridge = StudioMCPBridge()
+
+        mock_responses = [
+            {
+                "jsonrpc": "2.0",
+                "id": "__bridge_tool_list_0",
+                "result": {
+                    "content": [{"type": "text", "text": json.dumps({"studios": [{"id": "s1"}]})}]
+                }
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "__bridge_tool_set_0",
+                "error": {"code": -32000, "message": "Failed to set active studio"}
+            }
+        ]
+
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", side_effect=mock_responses):
+            success = bridge.ensure_active_studio()
+            self.assertFalse(success)
+            self.assertFalse(bridge.active_studio_set)
+
     def test_ensure_active_studio_empty_content(self):
         bridge = StudioMCPBridge()
         with patch.object(bridge, "send_to_proc", return_value=True), \
@@ -162,6 +226,66 @@ class TestStudioMCPBridge(unittest.TestCase):
             self.assertIn("error", resp)
             self.assertEqual(resp["error"]["code"], -32603)
 
+    def test_batch_request_handling(self):
+        bridge = StudioMCPBridge()
+        reqs = [
+            {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            {"jsonrpc": "2.0", "method": "custom/notify"},
+            {"jsonrpc": "2.0", "id": 2, "method": "ping"}
+        ]
+        with patch.object(bridge, "send_to_proc"):
+            responses = bridge.handle_message(reqs)
+            self.assertEqual(len(responses), 2)
+            self.assertEqual(responses[0]["id"], 1)
+            self.assertEqual(responses[1]["id"], 2)
+
+    def test_empty_batch_request(self):
+        bridge = StudioMCPBridge()
+        resp = bridge.handle_message([])
+        self.assertEqual(resp["error"]["code"], -32600)
+
+    def test_read_from_proc_correlation_and_notification(self):
+        bridge = StudioMCPBridge()
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        # Subprocess emits notification, then other id response, then target id response
+        mock_proc.stdout.readline.side_effect = [
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/progress", "params": {}}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "id": "other_id", "result": {"data": 1}}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "id": "target_id", "result": {"data": 2}}) + "\n",
+        ]
+        bridge.proc = mock_proc
+
+        with patch("sys.stdout.write") as mock_out_write, patch("sys.stdout.flush"):
+            res = bridge.read_from_proc(expected_id="target_id")
+            self.assertEqual(res["id"], "target_id")
+            self.assertEqual(res["result"]["data"], 2)
+
+            # Check that notification was forwarded to sys.stdout
+            mock_out_write.assert_called_once()
+            self.assertIn("notifications/progress", mock_out_write.call_args[0][0])
+
+            # Check that other_id response was saved in pending responses
+            self.assertIn("other_id", bridge._pending_responses)
+
+            # Subsequent call for other_id should retrieve cached response immediately
+            cached = bridge.read_from_proc(expected_id="other_id")
+            self.assertEqual(cached["id"], "other_id")
+            self.assertNotIn("other_id", bridge._pending_responses)
+
+    def test_ensure_process_running_auto_restart(self):
+        bridge = StudioMCPBridge()
+        bridge.proc = MagicMock()
+        bridge.proc.poll.return_value = 1  # terminated
+
+        with patch.object(bridge, "close") as mock_close, \
+             patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            bridge.ensure_process_running()
+            mock_close.assert_called_once()
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
+
     def test_close_teardown(self):
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
@@ -169,6 +293,7 @@ class TestStudioMCPBridge(unittest.TestCase):
         bridge.close()
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
+        self.assertIsNone(bridge.proc)
 
 
 if __name__ == "__main__":
