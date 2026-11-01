@@ -15,13 +15,16 @@ if not exist "%TARGET_DIR%" (
     exit /b 1
 )
 
-:: Check for Python
-where python >nul 2>nul
+:: Check for Python (verify executable runs; avoids WindowsApps execution alias stub)
+python -c "import sys; sys.exit(0)" >nul 2>nul
 if %ERRORLEVEL% neq 0 (
-    echo [ERROR] Python was not found in your PATH.
-    echo Please install Python 3.8+ and check "Add Python to PATH".
-    pause
-    exit /b 1
+    py -c "import sys; sys.exit(0)" >nul 2>nul
+    if !ERRORLEVEL! neq 0 (
+        echo [ERROR] Python was not found or is non-functional in your PATH.
+        echo Please install Python 3.8+ and ensure "Add Python to PATH" is checked.
+        pause
+        exit /b 1
+    )
 )
 
 echo [1/3] Backing up original mcp.bat...
