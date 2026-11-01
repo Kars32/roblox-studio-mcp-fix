@@ -170,6 +170,69 @@ class TestStudioMCPBridge(unittest.TestCase):
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once_with(timeout=2)
 
+    def test_batch_requests(self):
+        bridge = StudioMCPBridge()
+        bridge.init_res = {"result": {"serverInfo": {"name": "RobloxStudio", "version": "1.2.0"}}}
+        batch_req = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+            {"jsonrpc": "2.0", "id": 2, "method": "ping"},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"}  # notification: no response in batch
+        ]
+        resp = bridge.handle_message(batch_req)
+        self.assertIsInstance(resp, list)
+        self.assertEqual(len(resp), 2)
+        self.assertEqual(resp[0]["id"], 1)
+        self.assertEqual(resp[1]["id"], 2)
+
+    def test_empty_batch_request(self):
+        bridge = StudioMCPBridge()
+        resp = bridge.handle_message([])
+        self.assertIn("error", resp)
+        self.assertEqual(resp["error"]["code"], -32600)
+
+    def test_notification_forwarding_from_proc(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        # Subprocess outputs a server notification first, then the expected response
+        mock_proc.stdout.readline.side_effect = [
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/message", "params": {"text": "hello"}}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "id": "test_req", "result": {"status": "ok"}}) + "\n"
+        ]
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        with patch("sys.stdout.write") as mock_stdout_write:
+            res = bridge.read_from_proc(expected_id="test_req")
+            self.assertEqual(res["id"], "test_req")
+            # Verify the notification was forwarded to stdout
+            mock_stdout_write.assert_called()
+            forwarded = [call.args[0] for call in mock_stdout_write.call_args_list]
+            self.assertTrue(any("notifications/message" in text for text in forwarded))
+
+    def test_ensure_active_studio_numeric_id(self):
+        bridge = StudioMCPBridge()
+        mock_responses = [
+            {
+                "jsonrpc": "2.0",
+                "id": "__bridge_tool_list_0",
+                "result": {
+                    "content": [{"type": "text", "text": json.dumps({"studios": [{"id": 98765}]})}]
+                }
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "__bridge_tool_set_0",
+                "result": {
+                    "content": [{"type": "text", "text": "OK"}],
+                    "isError": False
+                }
+            }
+        ]
+        with patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", side_effect=mock_responses):
+            success = bridge.ensure_active_studio()
+            self.assertTrue(success)
+            self.assertTrue(bridge.active_studio_set)
+
 
 if __name__ == "__main__":
     unittest.main()
