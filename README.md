@@ -11,7 +11,7 @@ A lightweight Python bridge for Roblox Studio's Model Context Protocol (MCP) ser
 
 ## The Issues
 
-When connecting MCP clients to Roblox Studio, three common issues prevent tools from executing:
+When connecting MCP clients to Roblox Studio, common issues prevent tools from executing:
 
 ### 1. `server/discover` Handshake Panic
 ```text
@@ -34,6 +34,9 @@ Roblox's generated `%LOCALAPPDATA%\Roblox\mcp.bat` places the `else` keyword on 
 ### 4. Active Studio Session Binding
 `StudioMCP.exe` requires clients to query `list_roblox_studios` and call `set_active_studio` before tool execution works. This bridge automatically resolves and binds the active Studio session when running commands.
 
+### 5. Robust Subprocess Auto-Recovery and ID Correlation
+If `StudioMCP.exe` restarts or disconnects, the bridge automatically recovers the connection and handles asynchronous message buffering without desynchronizing JSON-RPC request-response pairs.
+
 ---
 
 ## Quick Install (Automatic)
@@ -52,9 +55,18 @@ Roblox's generated `%LOCALAPPDATA%\Roblox\mcp.bat` places the `else` keyword on 
 ## Requirements
 
 * Windows 10 or 11
-* Python 3.8+ on PATH
+* Python 3.8+ on PATH (or Windows Python Launcher `py`)
 * Roblox Studio with **Beta Features $\rightarrow$ Model Context Protocol** enabled
 * An open Place/Project loaded in Roblox Studio
+
+---
+
+## Configuration & Environment Variables
+
+| Variable | Description | Default |
+|---|---|---|
+| `STUDIO_MCP_PATH` | Explicit full path to `StudioMCP.exe`. | Auto-detected from `%LOCALAPPDATA%\Roblox\Versions`, `%ProgramFiles%\Roblox\Versions`, or `%ProgramFiles(x86)%\Roblox\Versions`. |
+| `STUDIO_MCP_DEBUG` | Set to `1`, `true`, or `yes` to output bridge diagnostics to `stderr`. | `0` (disabled) |
 
 ---
 
@@ -66,17 +78,29 @@ If you prefer to install manually:
 2. Replace `%LOCALAPPDATA%\Roblox\mcp.bat` with:
    ```bat
    @echo off
-   python "%LOCALAPPDATA%\Roblox\studio_mcp_bridge.py" %*
+   setlocal
+   where python >nul 2>&1
+   if %ERRORLEVEL% equ 0 (
+       python "%LOCALAPPDATA%\Roblox\studio_mcp_bridge.py" %*
+       exit /b
+   )
+   where py >nul 2>&1
+   if %ERRORLEVEL% equ 0 (
+       py -3 "%LOCALAPPDATA%\Roblox\studio_mcp_bridge.py" %*
+       exit /b
+   )
+   echo [ERROR] Python 3 was not found in PATH or via Python Launcher (py). >&2
+   exit /b 1
    ```
 3. Add the server to your client's MCP configuration (`mcp_config.json`):
    ```json
    {
-     \"mcpServers\": {
-       \"Roblox_Studio\": {
-         \"command\": \"cmd.exe\",
-         \"args\": [
-           \"/c\",
-           \"cd /d %LOCALAPPDATA%\\\\Roblox && .\\\\mcp.bat\"
+     "mcpServers": {
+       "Roblox_Studio": {
+         "command": "cmd.exe",
+         "args": [
+           "/c",
+           "cd /d %LOCALAPPDATA%\\Roblox && .\\mcp.bat"
          ]
        }
      }
@@ -96,6 +120,8 @@ MCP Host (Antigravity / Claude Code / Cursor / OpenCode)
        ├── Handles initial handshake with StudioMCP.exe
        ├── Responds to host discovery probes with tool catalog
        ├── Auto-binds active Roblox Studio instance ID
+       ├── Buffers out-of-order JSON-RPC responses and notifications
+       ├── Auto-restarts StudioMCP.exe upon process crash/disconnect
        ▼
 StudioMCP.exe (Roblox Server) ─── Local WebSocket ───► Roblox Studio
 ```

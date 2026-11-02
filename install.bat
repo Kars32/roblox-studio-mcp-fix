@@ -9,16 +9,26 @@ echo.
 set "TARGET_DIR=%LOCALAPPDATA%\Roblox"
 
 if not exist "%TARGET_DIR%" (
-    echo [ERROR] Could not find Roblox directory at %TARGET_DIR%
+    echo [ERROR] Could not find Roblox directory at "%TARGET_DIR%"
     echo Please make sure Roblox Studio is installed.
     pause
     exit /b 1
 )
 
-:: Check for Python
+:: Check for Python or py launcher
+set "PYTHON_CMD="
 where python >nul 2>nul
-if %ERRORLEVEL% neq 0 (
-    echo [ERROR] Python was not found in your PATH.
+if %ERRORLEVEL% equ 0 (
+    set "PYTHON_CMD=python"
+) else (
+    where py >nul 2>nul
+    if !ERRORLEVEL! equ 0 (
+        set "PYTHON_CMD=py -3"
+    )
+)
+
+if "%PYTHON_CMD%"=="" (
+    echo [ERROR] Python 3 was not found in your PATH or py launcher.
     echo Please install Python 3.8+ and check "Add Python to PATH".
     pause
     exit /b 1
@@ -30,19 +40,19 @@ if exist "%TARGET_DIR%\mcp.bat" (
         findstr /i "studio_mcp_bridge.py" "%TARGET_DIR%\mcp.bat" >nul 2>&1
         if !ERRORLEVEL! neq 0 (
             copy /y "%TARGET_DIR%\mcp.bat" "%TARGET_DIR%\mcp.bat.backup" >nul
-            echo     Created backup at %TARGET_DIR%\mcp.bat.backup
+            echo     Created backup at "%TARGET_DIR%\mcp.bat.backup"
         ) else (
             echo     Current mcp.bat is already the bridge script; skipping backup.
         )
     ) else (
-        echo     Existing backup found at %TARGET_DIR%\mcp.bat.backup
+        echo     Existing backup found at "%TARGET_DIR%\mcp.bat.backup"
     )
 )
 
 echo [2/3] Installing studio_mcp_bridge.py...
 copy /y "%~dp0studio_mcp_bridge.py" "%TARGET_DIR%\studio_mcp_bridge.py" >nul
 if %ERRORLEVEL% neq 0 (
-    echo [ERROR] Failed to copy studio_mcp_bridge.py to %TARGET_DIR%
+    echo [ERROR] Failed to copy studio_mcp_bridge.py to "%TARGET_DIR%"
     pause
     exit /b 1
 )
@@ -50,7 +60,7 @@ if %ERRORLEVEL% neq 0 (
 echo [3/3] Updating mcp.bat...
 copy /y "%~dp0mcp.bat" "%TARGET_DIR%\mcp.bat" >nul
 if %ERRORLEVEL% neq 0 (
-    echo [ERROR] Failed to update mcp.bat in %TARGET_DIR%
+    echo [ERROR] Failed to update mcp.bat in "%TARGET_DIR%"
     pause
     exit /b 1
 )

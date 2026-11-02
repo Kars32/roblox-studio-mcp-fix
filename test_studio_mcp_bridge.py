@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import studio_mcp_bridge
-from studio_mcp_bridge import StudioMCPBridge, find_studio_mcp_path, reconfigure_io
+from studio_mcp_bridge import StudioMCPBridge, find_studio_mcp_path, reconfigure_io, log_debug
 
 
 class TestStudioMCPBridge(unittest.TestCase):
@@ -36,10 +36,35 @@ class TestStudioMCPBridge(unittest.TestCase):
             os.utime(exe1, (1000.0, 1000.0))
             os.utime(exe2, (2000.0, 2000.0))
 
-            with patch("os.path.expandvars", return_value=tmpdir):
+            def mock_expandvars(path):
+                if "LOCALAPPDATA" in path:
+                    return tmpdir
+                return ""
+
+            with patch("os.path.expandvars", side_effect=mock_expandvars):
                 with patch.dict(os.environ, {}, clear=True):
                     found = find_studio_mcp_path()
                     self.assertEqual(os.path.abspath(found), os.path.abspath(exe2))
+
+    def test_find_studio_mcp_path_limits_depth(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Layout: tmpdir/version-1/deep/nested/StudioMCP.exe
+            deep_dir = os.path.join(tmpdir, "version-1", "deep", "nested")
+            os.makedirs(deep_dir)
+            deep_exe = os.path.join(deep_dir, "StudioMCP.exe")
+            with open(deep_exe, "w") as f:
+                f.write("deep")
+
+            def mock_expandvars(path):
+                if "LOCALAPPDATA" in path:
+                    return tmpdir
+                return ""
+
+            with patch("os.path.expandvars", side_effect=mock_expandvars):
+                with patch.dict(os.environ, {}, clear=True):
+                    found = find_studio_mcp_path()
+                    # Because it's beyond depth 2, it should not be found
+                    self.assertIsNone(found)
 
     def test_init_proc(self):
         mock_proc = MagicMock()
@@ -58,7 +83,7 @@ class TestStudioMCPBridge(unittest.TestCase):
 
     def test_handle_message_initialize(self):
         bridge = StudioMCPBridge()
-        bridge.init_res = {"result": {"serverInfo": {"name": "RobloxStudio", "version": "1.2.0"}}}
+        bridge.init_res = {"result": {"serverInfo": {"name": "RobloxStudio", "version": "1.3.0"}}}
         req = {"jsonrpc": "2.0", "id": 1, "method": "initialize"}
         resp = bridge.handle_message(req)
         self.assertEqual(resp["id"], 1)
@@ -161,6 +186,53 @@ class TestStudioMCPBridge(unittest.TestCase):
             self.assertEqual(resp["id"], 10)
             self.assertIn("error", resp)
             self.assertEqual(resp["error"]["code"], -32603)
+
+    def test_read_from_proc_id_buffering(self):
+        """Test that out-of-order responses with IDs are buffered and retrieved correctly."""
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+
+        # Suppose proc outputs response for msg 2, then response for msg 1
+        lines = [
+            json.dumps({"jsonrpc": "2.0", "id": 2, "result": "res_2"}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "id": 1, "result": "res_1"}) + "\n"
+        ]
+        mock_proc.stdout.readline.side_effect = lines
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+
+        # Asking for expected_id=1 should read msg 2, buffer it, then read and return msg 1
+        res1 = bridge.read_from_proc(expected_id=1)
+        self.assertEqual(res1["id"], 1)
+        self.assertEqual(res1["result"], "res_1")
+        self.assertIn(2, bridge._response_buffer)
+
+        # Asking for expected_id=2 should return buffered message without reading from stdout
+        res2 = bridge.read_from_proc(expected_id=2)
+        self.assertEqual(res2["id"], 2)
+        self.assertEqual(res2["result"], "res_2")
+        self.assertEqual(len(bridge._response_buffer), 0)
+
+    def test_auto_recover_on_dead_process(self):
+        """Test that handle_message attempts restart if proc had died."""
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = -1  # Dead
+        bridge = StudioMCPBridge(proc=mock_proc)
+        bridge.studio_mcp_path = "/path/to/StudioMCP.exe"
+
+        with patch.object(bridge, "restart_process") as mock_restart, \
+             patch.object(bridge, "send_to_proc", return_value=True), \
+             patch.object(bridge, "read_from_proc", return_value={"jsonrpc": "2.0", "id": 99, "result": {}}):
+            req = {"jsonrpc": "2.0", "id": 99, "method": "ping"}
+            resp = bridge.handle_message(req)
+            mock_restart.assert_called_once()
+            self.assertEqual(resp["id"], 99)
+
+    def test_debug_logging(self):
+        with patch.object(studio_mcp_bridge, "DEBUG", True), \
+             patch.object(sys.stderr, "write") as mock_err_write:
+            log_debug("test log message")
+            mock_err_write.assert_called()
 
     def test_close_teardown(self):
         mock_proc = MagicMock()
