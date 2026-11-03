@@ -7,10 +7,73 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import studio_mcp_bridge
-from studio_mcp_bridge import StudioMCPBridge, find_studio_mcp_path, reconfigure_io
+from studio_mcp_bridge import (
+    StudioMCPBridge,
+    find_studio_mcp_path,
+    reconfigure_io,
+    is_debug_enabled,
+    debug_log,
+)
 
 
 class TestStudioMCPBridge(unittest.TestCase):
+
+    def test_debug_logging_env_vars(self):
+        for val in ("1", "true", "yes", "True", "YES"):
+            with patch.dict(os.environ, {"STUDIO_MCP_DEBUG": val}):
+                self.assertTrue(is_debug_enabled())
+
+        for val in ("0", "false", "no", "", "random"):
+            with patch.dict(os.environ, {"STUDIO_MCP_DEBUG": val}):
+                self.assertFalse(is_debug_enabled())
+
+    def test_debug_log_output(self):
+        with patch.dict(os.environ, {"STUDIO_MCP_DEBUG": "1"}):
+            with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+                debug_log("Test message", 123)
+                self.assertIn("[StudioMCPBridge] Test message 123\n", mock_stderr.getvalue())
+
+        with patch.dict(os.environ, {"STUDIO_MCP_DEBUG": "0"}):
+            with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+                debug_log("Should not appear")
+                self.assertEqual(mock_stderr.getvalue(), "")
+
+    def test_read_from_proc_matches_expected_id_and_buffers_unsolicited(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        # Subprocess outputs an unsolicited notification, then an unrelated response, then the expected response
+        stdout_lines = [
+            json.dumps({"jsonrpc": "2.0", "method": "host/notification", "params": {"status": "ok"}}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "id": "other_req_id", "result": {"other": True}}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "id": "my_req_id", "result": {"success": True}}) + "\n",
+        ]
+        mock_proc.stdout.readline.side_effect = stdout_lines
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        res = bridge.read_from_proc(expected_id="my_req_id")
+
+        self.assertIsNotNone(res)
+        self.assertEqual(res.get("id"), "my_req_id")
+        self.assertEqual(len(bridge.buffered_notifications), 1)
+        self.assertEqual(bridge.buffered_notifications[0]["method"], "host/notification")
+        self.assertIn("other_req_id", bridge.pending_responses)
+
+        # Subsequent call for other_req_id should return from cache
+        other_res = bridge.read_from_proc(expected_id="other_req_id")
+        self.assertEqual(other_res.get("id"), "other_req_id")
+        self.assertNotIn("other_req_id", bridge.pending_responses)
+
+    def test_ensure_process_running_respawns_dead_proc(self):
+        mock_dead_proc = MagicMock()
+        mock_dead_proc.poll.return_value = 1  # terminated
+
+        bridge = StudioMCPBridge(proc=mock_dead_proc)
+        with patch.object(bridge, "start_process") as mock_start, \
+             patch.object(bridge, "init_proc") as mock_init:
+            restarted = bridge.ensure_process_running()
+            self.assertTrue(restarted)
+            mock_start.assert_called_once()
+            mock_init.assert_called_once()
 
     def test_find_studio_mcp_path_env_var(self):
         with patch.dict(os.environ, {"STUDIO_MCP_PATH": "/custom/path/StudioMCP.exe"}):
