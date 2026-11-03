@@ -15,8 +15,12 @@ if exist "%TARGET_DIR%\studio_mcp_bridge.py" (
 
 if exist "%TARGET_DIR%\mcp.bat.backup" (
     copy /y "%TARGET_DIR%\mcp.bat.backup" "%TARGET_DIR%\mcp.bat" >nul
-    del /f /q "%TARGET_DIR%\mcp.bat.backup"
-    echo Restored original mcp.bat from backup
+    if !ERRORLEVEL! equ 0 (
+        del /f /q "%TARGET_DIR%\mcp.bat.backup"
+        echo Restored original mcp.bat from backup
+    ) else (
+        echo [ERROR] Failed to restore mcp.bat from %TARGET_DIR%\mcp.bat.backup
+    )
 ) else (
     echo [NOTICE] Backup file mcp.bat.backup not found. Left existing mcp.bat in place.
 )

@@ -18,10 +18,13 @@ if not exist "%TARGET_DIR%" (
 :: Check for Python
 where python >nul 2>nul
 if %ERRORLEVEL% neq 0 (
-    echo [ERROR] Python was not found in your PATH.
-    echo Please install Python 3.8+ and check "Add Python to PATH".
-    pause
-    exit /b 1
+    where py >nul 2>nul
+    if !ERRORLEVEL! neq 0 (
+        echo [ERROR] Python was not found in your PATH.
+        echo Please install Python 3.8+ and check "Add Python to PATH".
+        pause
+        exit /b 1
+    )
 )
 
 echo [1/3] Backing up original mcp.bat...
@@ -30,7 +33,11 @@ if exist "%TARGET_DIR%\mcp.bat" (
         findstr /i "studio_mcp_bridge.py" "%TARGET_DIR%\mcp.bat" >nul 2>&1
         if !ERRORLEVEL! neq 0 (
             copy /y "%TARGET_DIR%\mcp.bat" "%TARGET_DIR%\mcp.bat.backup" >nul
-            echo     Created backup at %TARGET_DIR%\mcp.bat.backup
+            if !ERRORLEVEL! equ 0 (
+                echo     Created backup at %TARGET_DIR%\mcp.bat.backup
+            ) else (
+                echo     [WARNING] Could not create backup at %TARGET_DIR%\mcp.bat.backup
+            )
         ) else (
             echo     Current mcp.bat is already the bridge script; skipping backup.
         )
