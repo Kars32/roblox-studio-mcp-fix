@@ -41,7 +41,7 @@ if exist "%TARGET_DIR%\mcp.bat" (
 
 echo [2/3] Installing studio_mcp_bridge.py...
 copy /y "%~dp0studio_mcp_bridge.py" "%TARGET_DIR%\studio_mcp_bridge.py" >nul
-if %ERRORLEVEL% neq 0 (
+if !ERRORLEVEL! neq 0 (
     echo [ERROR] Failed to copy studio_mcp_bridge.py to %TARGET_DIR%
     pause
     exit /b 1
@@ -49,7 +49,7 @@ if %ERRORLEVEL% neq 0 (
 
 echo [3/3] Updating mcp.bat...
 copy /y "%~dp0mcp.bat" "%TARGET_DIR%\mcp.bat" >nul
-if %ERRORLEVEL% neq 0 (
+if !ERRORLEVEL! neq 0 (
     echo [ERROR] Failed to update mcp.bat in %TARGET_DIR%
     pause
     exit /b 1
