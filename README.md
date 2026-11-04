@@ -58,6 +58,15 @@ Roblox's generated `%LOCALAPPDATA%\Roblox\mcp.bat` places the `else` keyword on 
 
 ---
 
+## Configuration & Environment Variables
+
+| Variable | Description |
+|---|---|
+| `STUDIO_MCP_PATH` | Explicit path to `StudioMCP.exe` if not using default `%LOCALAPPDATA%\Roblox\Versions`. |
+| `STUDIO_MCP_DEBUG` | Set to `1`, `true`, or `yes` to enable bridge debug diagnostics on `stderr`. |
+
+---
+
 ## Manual Installation
 
 If you prefer to install manually:
@@ -67,16 +76,17 @@ If you prefer to install manually:
    ```bat
    @echo off
    python "%LOCALAPPDATA%\Roblox\studio_mcp_bridge.py" %*
+   exit /b %ERRORLEVEL%
    ```
 3. Add the server to your client's MCP configuration (`mcp_config.json`):
    ```json
    {
-     \"mcpServers\": {
-       \"Roblox_Studio\": {
-         \"command\": \"cmd.exe\",
-         \"args\": [
-           \"/c\",
-           \"cd /d %LOCALAPPDATA%\\\\Roblox && .\\\\mcp.bat\"
+     "mcpServers": {
+       "Roblox_Studio": {
+         "command": "cmd.exe",
+         "args": [
+           "/c",
+           "cd /d %LOCALAPPDATA%\\Roblox && .\\mcp.bat"
          ]
        }
      }
@@ -99,6 +109,19 @@ MCP Host (Antigravity / Claude Code / Cursor / OpenCode)
        ▼
 StudioMCP.exe (Roblox Server) ─── Local WebSocket ───► Roblox Studio
 ```
+
+---
+
+## Troubleshooting & Debugging
+
+If your MCP client has issues connecting to Roblox Studio:
+1. Verify that Roblox Studio is running and an active place/project is opened.
+2. Ensure **Model Context Protocol** is enabled under **File > Beta Features** in Roblox Studio.
+3. Enable debug output in your MCP configuration or command prompt:
+   ```cmd
+   set STUDIO_MCP_DEBUG=1
+   ```
+   Debug messages with prefix `[StudioMCP-Bridge]` will be printed to `stderr` without interfering with JSON-RPC on `stdout`.
 
 ---
 
