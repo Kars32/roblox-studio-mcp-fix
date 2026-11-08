@@ -7,10 +7,49 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import studio_mcp_bridge
-from studio_mcp_bridge import StudioMCPBridge, find_studio_mcp_path, reconfigure_io
+from studio_mcp_bridge import StudioMCPBridge, find_studio_mcp_path, reconfigure_io, is_debug_enabled, debug_log
 
 
 class TestStudioMCPBridge(unittest.TestCase):
+
+    def test_is_debug_enabled(self):
+        for val in ["1", "true", "TRUE", "yes", "YES"]:
+            with patch.dict(os.environ, {"STUDIO_MCP_DEBUG": val}):
+                self.assertTrue(is_debug_enabled())
+        for val in ["0", "false", "no", "", "random"]:
+            with patch.dict(os.environ, {"STUDIO_MCP_DEBUG": val}):
+                self.assertFalse(is_debug_enabled())
+
+    def test_debug_log(self):
+        with patch.dict(os.environ, {"STUDIO_MCP_DEBUG": "1"}):
+            with patch("sys.stderr.write") as mock_write:
+                debug_log("test message")
+                mock_write.assert_any_call("[StudioMCPBridge] test message\n")
+
+    def test_read_from_proc_id_matching_and_caching(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        # Process returns an unsolicited notification, then response 2, then response 1
+        lines = [
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/some_event", "params": {}}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "id": 2, "result": {"data": 2}}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"data": 1}}) + "\n",
+        ]
+        mock_proc.stdout.readline.side_effect = lines
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        # We request id 1 first
+        res1 = bridge.read_from_proc(target_id=1)
+        self.assertIsNotNone(res1)
+        self.assertEqual(res1.get("id"), 1)
+        # id 2 should have been cached in pending_responses
+        self.assertIn(2, bridge.pending_responses)
+
+        # Reading id 2 now should come from pending_responses directly without calling readline again
+        res2 = bridge.read_from_proc(target_id=2)
+        self.assertIsNotNone(res2)
+        self.assertEqual(res2.get("id"), 2)
+        self.assertNotIn(2, bridge.pending_responses)
 
     def test_find_studio_mcp_path_env_var(self):
         with patch.dict(os.environ, {"STUDIO_MCP_PATH": "/custom/path/StudioMCP.exe"}):
