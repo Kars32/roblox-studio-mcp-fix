@@ -9,6 +9,20 @@ import subprocess
 import json
 import os
 import time
+import threading
+
+
+def is_debug_enabled():
+    """Returns True if STUDIO_MCP_DEBUG is set to 1, true, or yes."""
+    val = os.environ.get("STUDIO_MCP_DEBUG", "").strip().lower()
+    return val in ("1", "true", "yes")
+
+
+def debug_log(message):
+    """Logs debug message to stderr if debug mode is enabled."""
+    if is_debug_enabled():
+        sys.stderr.write(f"[StudioMCPBridge] {message}\n")
+        sys.stderr.flush()
 
 
 def reconfigure_io():
@@ -55,6 +69,21 @@ class StudioMCPBridge:
         self.proc = proc
         self.active_studio_set = False
         self.init_res = None
+        self.pending_responses = {}
+
+    def _drain_stderr(self):
+        """Drains stderr from StudioMCP process to prevent pipe deadlocks and logs if debug enabled."""
+        if not self.proc or not self.proc.stderr:
+            return
+        try:
+            for line in iter(self.proc.stderr.readline, ""):
+                if not line:
+                    break
+                stripped = line.strip()
+                if stripped:
+                    debug_log(f"[StudioMCP:stderr] {stripped}")
+        except Exception:
+            pass
 
     def start_process(self):
         if not self.studio_mcp_path:
@@ -64,30 +93,46 @@ class StudioMCPBridge:
             sys.stderr.write("Error: Could not locate StudioMCP.exe in %LOCALAPPDATA%\\Roblox\\Versions\n")
             sys.exit(1)
 
+        debug_log(f"Starting process: {self.studio_mcp_path}")
         self.proc = subprocess.Popen(
             [self.studio_mcp_path],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             bufsize=1
         )
 
+        stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
+        stderr_thread.start()
+
     def send_to_proc(self, msg):
         if not self.proc or not self.proc.stdin or self.proc.poll() is not None:
+            debug_log("send_to_proc failed: process is not running or stdin is closed")
             return False
         payload = json.dumps(msg) + "\n"
+        debug_log(f"-> StudioMCP: {payload.strip()}")
         try:
             self.proc.stdin.write(payload)
             self.proc.stdin.flush()
             return True
-        except (BrokenPipeError, OSError, ValueError):
+        except (BrokenPipeError, OSError, ValueError) as e:
+            debug_log(f"send_to_proc exception: {e}")
             return False
 
-    def read_from_proc(self):
+    def read_from_proc(self, target_id=None, timeout=None):
+        """
+        Reads lines from StudioMCP stdout.
+        If target_id is specified, continues reading until a response matching target_id
+        is received, caching any other responses by id in self.pending_responses.
+        """
+        if target_id is not None and target_id in self.pending_responses:
+            return self.pending_responses.pop(target_id)
+
         if not self.proc or not self.proc.stdout or self.proc.poll() is not None:
             return None
+
         while True:
             try:
                 line = self.proc.stdout.readline()
@@ -99,14 +144,30 @@ class StudioMCPBridge:
             if not line_str:
                 continue
             try:
-                return json.loads(line_str)
+                msg = json.loads(line_str)
+                debug_log(f"<- StudioMCP: {line_str}")
             except Exception:
-                pass
+                continue
+
+            if isinstance(msg, dict):
+                msg_id = msg.get("id")
+                if target_id is not None:
+                    if msg_id == target_id:
+                        return msg
+                    elif msg_id is not None:
+                        self.pending_responses[msg_id] = msg
+                        continue
+                    else:
+                        # Notification from StudioMCP, ignore or log
+                        debug_log(f"Received notification from StudioMCP: {msg}")
+                        continue
+                return msg
 
     def init_proc(self):
+        init_id = "__bridge_init__"
         if not self.send_to_proc({
             "jsonrpc": "2.0",
-            "id": "__bridge_init__",
+            "id": init_id,
             "method": "initialize",
             "params": {
                 "protocolVersion": "2024-11-05",
@@ -115,7 +176,7 @@ class StudioMCPBridge:
             }
         }):
             return None
-        self.init_res = self.read_from_proc()
+        self.init_res = self.read_from_proc(target_id=init_id)
         self.send_to_proc({"jsonrpc": "2.0", "method": "notifications/initialized"})
         return self.init_res
 
@@ -129,7 +190,7 @@ class StudioMCPBridge:
                 "params": {"name": name, "arguments": args}
             }):
                 return None
-            res = self.read_from_proc()
+            res = self.read_from_proc(target_id=req_id)
             if res and isinstance(res, dict) and res.get("id") == req_id:
                 if "result" in res:
                     content = res["result"].get("content", [])
@@ -197,13 +258,14 @@ class StudioMCPBridge:
             return None
 
         elif method == "server/discover":
+            disc_id = f"list_discover_{req_id}"
             if self.send_to_proc({
                 "jsonrpc": "2.0",
-                "id": "list_discover",
+                "id": disc_id,
                 "method": "tools/list",
                 "params": {}
             }):
-                list_res = self.read_from_proc()
+                list_res = self.read_from_proc(target_id=disc_id)
                 tools_list = list_res.get("result", {}).get("tools", []) if (list_res and isinstance(list_res, dict)) else []
                 return {
                     "jsonrpc": "2.0",
@@ -226,7 +288,7 @@ class StudioMCPBridge:
                     "id": req_id,
                     "error": {"code": -32603, "message": "Failed to query StudioMCP process"}
                 }
-            resp = self.read_from_proc()
+            resp = self.read_from_proc(target_id=req_id)
             if resp is None:
                 return {
                     "jsonrpc": "2.0",
@@ -248,7 +310,7 @@ class StudioMCPBridge:
                     "id": req_id,
                     "error": {"code": -32603, "message": "Failed to send tool call to StudioMCP process"}
                 }
-            resp = self.read_from_proc()
+            resp = self.read_from_proc(target_id=req_id)
             if resp is None:
                 return {
                     "jsonrpc": "2.0",
@@ -275,7 +337,7 @@ class StudioMCPBridge:
                     "id": req_id,
                     "error": {"code": -32603, "message": f"Failed to send {method} to StudioMCP process"}
                 }
-            resp = self.read_from_proc()
+            resp = self.read_from_proc(target_id=req_id)
             if resp is None:
                 return {
                     "jsonrpc": "2.0",
@@ -285,15 +347,18 @@ class StudioMCPBridge:
             return resp
 
     def run(self):
+        debug_log("StudioMCPBridge run loop started")
         while True:
             try:
                 line = sys.stdin.readline()
                 if not line:
+                    debug_log("sys.stdin closed (EOF), exiting run loop")
                     break
                 line_str = line.strip()
                 if not line_str:
                     continue
 
+                debug_log(f"-> Host: {line_str}")
                 try:
                     req = json.loads(line_str)
                 except Exception as e:
@@ -311,12 +376,15 @@ class StudioMCPBridge:
 
                 resp = self.handle_message(req)
                 if resp is not None:
-                    sys.stdout.write(json.dumps(resp) + "\n")
+                    out = json.dumps(resp) + "\n"
+                    debug_log(f"<- Host: {out.strip()}")
+                    sys.stdout.write(out)
                     sys.stdout.flush()
 
             except (KeyboardInterrupt, SystemExit):
                 break
-            except Exception:
+            except Exception as e:
+                debug_log(f"Exception in run loop: {e}")
                 pass
 
     def close(self):
