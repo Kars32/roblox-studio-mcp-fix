@@ -18,7 +18,14 @@ if exist "%TARGET_DIR%\mcp.bat.backup" (
     del /f /q "%TARGET_DIR%\mcp.bat.backup"
     echo Restored original mcp.bat from backup
 ) else (
-    echo [NOTICE] Backup file mcp.bat.backup not found. Left existing mcp.bat in place.
+    echo [NOTICE] Backup file mcp.bat.backup not found.
+    findstr /i "studio_mcp_bridge.py" "%TARGET_DIR%\mcp.bat" >nul 2>&1
+    if !ERRORLEVEL! equ 0 (
+        del /f /q "%TARGET_DIR%\mcp.bat"
+        echo Removed modified mcp.bat (no backup available to restore).
+    ) else (
+        echo Left existing mcp.bat in place.
+    )
 )
 
 echo.
