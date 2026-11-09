@@ -7,10 +7,97 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import studio_mcp_bridge
-from studio_mcp_bridge import StudioMCPBridge, find_studio_mcp_path, reconfigure_io
+from studio_mcp_bridge import StudioMCPBridge, find_studio_mcp_path, reconfigure_io, is_debug_enabled, log_debug
 
 
 class TestStudioMCPBridge(unittest.TestCase):
+
+    def test_debug_logging_flags(self):
+        for val in ("1", "true", "yes", "TRUE", "Yes"):
+            with patch.dict(os.environ, {"STUDIO_MCP_DEBUG": val}):
+                self.assertTrue(is_debug_enabled())
+        for val in ("0", "false", "no", "", "random"):
+            with patch.dict(os.environ, {"STUDIO_MCP_DEBUG": val}):
+                self.assertFalse(is_debug_enabled())
+
+        with patch.dict(os.environ, {"STUDIO_MCP_DEBUG": "1"}):
+            with patch("sys.stderr", new=io.StringIO()) as fake_stderr:
+                log_debug("test message")
+                self.assertIn("[StudioMCPBridge] test message\n", fake_stderr.getvalue())
+
+    def test_handle_client_response_does_not_deadlock(self):
+        mock_proc = MagicMock()
+        mock_proc.stdin = io.StringIO()
+        mock_proc.poll.return_value = None
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        # Client sends a response back to the server (e.g., in response to a server request or ping)
+        client_response = {"jsonrpc": "2.0", "id": 42, "result": {"success": True}}
+        resp = bridge.handle_message(client_response)
+        self.assertIsNone(resp)
+
+        stdin_value = mock_proc.stdin.getvalue()
+        self.assertIn('"id": 42', stdin_value)
+        self.assertIn('"result": {"success": true}', stdin_value)
+
+    def test_handle_batch_requests_and_empty_batch(self):
+        bridge = StudioMCPBridge()
+        bridge.init_res = {"result": {"serverInfo": {"name": "RobloxStudio"}}}
+
+        # Simulate stdin input containing a batch request and an empty batch
+        batch_input = json.dumps([
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+            {"jsonrpc": "2.0", "id": 2, "method": "ping"}
+        ]) + "\n[]\n"
+
+        with patch("sys.stdin", io.StringIO(batch_input)), \
+             patch("sys.stdout", new=io.StringIO()) as fake_stdout:
+            bridge.run()
+            output = fake_stdout.getvalue().strip().split("\n")
+            self.assertEqual(len(output), 2)
+
+            batch_res = json.loads(output[0])
+            self.assertEqual(len(batch_res), 2)
+            self.assertEqual(batch_res[0]["id"], 1)
+            self.assertEqual(batch_res[1]["id"], 2)
+
+            empty_batch_res = json.loads(output[1])
+            self.assertEqual(empty_batch_res["error"]["code"], -32600)
+
+    def test_read_from_proc_with_expected_id_forwards_notifications(self):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        # Provide a notification line followed by the target response line
+        mock_proc.stdout = io.StringIO(
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/test", "params": {}}) + "\n" +
+            json.dumps({"jsonrpc": "2.0", "id": "target_id", "result": {"data": 1}}) + "\n"
+        )
+
+        bridge = StudioMCPBridge(proc=mock_proc)
+        with patch("sys.stdout", new=io.StringIO()) as fake_stdout:
+            res = bridge.read_from_proc(expected_id="target_id")
+            self.assertIsNotNone(res)
+            self.assertEqual(res["id"], "target_id")
+            # Notification should have been forwarded to stdout
+            self.assertIn("notifications/test", fake_stdout.getvalue())
+
+    def test_reconnect_recovery(self):
+        bridge = StudioMCPBridge(studio_mcp_path="/mock/path/StudioMCP.exe")
+        dead_proc = MagicMock()
+        dead_proc.poll.return_value = 1  # exited
+        bridge.proc = dead_proc
+
+        new_proc = MagicMock()
+        new_proc.stdin = io.StringIO()
+        new_proc.stdout = io.StringIO()
+        new_proc.poll.return_value = None
+
+        with patch("subprocess.Popen", return_value=new_proc) as mock_popen, \
+             patch.object(bridge, "init_proc") as mock_init:
+            bridge.ensure_process_running()
+            mock_popen.assert_called_once()
+            mock_init.assert_called_once()
+            self.assertEqual(bridge.proc, new_proc)
 
     def test_find_studio_mcp_path_env_var(self):
         with patch.dict(os.environ, {"STUDIO_MCP_PATH": "/custom/path/StudioMCP.exe"}):

@@ -52,9 +52,20 @@ Roblox's generated `%LOCALAPPDATA%\Roblox\mcp.bat` places the `else` keyword on 
 ## Requirements
 
 * Windows 10 or 11
-* Python 3.8+ on PATH
+* Python 3.8+ on PATH (or Python launcher `py`)
 * Roblox Studio with **Beta Features $\rightarrow$ Model Context Protocol** enabled
 * An open Place/Project loaded in Roblox Studio
+
+---
+
+## Configuration & Debugging
+
+The bridge supports the following environment variables:
+
+| Environment Variable | Description |
+|----------------------|-------------|
+| `STUDIO_MCP_PATH` | Explicit path to `StudioMCP.exe` (overrides auto-detection). |
+| `STUDIO_MCP_DEBUG` | Set to `1`, `true`, or `yes` to output diagnostic logging to stderr. |
 
 ---
 
