@@ -11,6 +11,19 @@ import os
 import time
 
 
+def is_debug_enabled():
+    """Returns True if STUDIO_MCP_DEBUG is set to '1', 'true', or 'yes'."""
+    val = os.environ.get("STUDIO_MCP_DEBUG", "").strip().lower()
+    return val in ("1", "true", "yes")
+
+
+def log_debug(msg):
+    """Logs message to sys.stderr if debug logging is enabled."""
+    if is_debug_enabled():
+        sys.stderr.write(f"[StudioMCPBridge] {msg}\n")
+        sys.stderr.flush()
+
+
 def reconfigure_io():
     """Ensure UTF-8 I/O on Windows or any runtime environment."""
     if hasattr(sys.stdin, "reconfigure"):
@@ -25,6 +38,7 @@ def find_studio_mcp_path():
     """
     Locates StudioMCP.exe via STUDIO_MCP_PATH env var or by searching Roblox Versions.
     Returns the executable with the latest modification time if multiple versions exist.
+    Optimized to search immediate version folders first, falling back to os.walk only if needed.
     """
     env_path = os.environ.get("STUDIO_MCP_PATH")
     if env_path and os.path.isfile(env_path):
@@ -33,14 +47,30 @@ def find_studio_mcp_path():
     versions_dir = os.path.expandvars(r"%LOCALAPPDATA%\Roblox\Versions")
     candidates = []
     if os.path.exists(versions_dir):
-        for root, _, files in os.walk(versions_dir):
-            if "StudioMCP.exe" in files:
-                full_path = os.path.join(root, "StudioMCP.exe")
-                try:
-                    mtime = os.path.getmtime(full_path)
-                    candidates.append((mtime, full_path))
-                except OSError:
-                    candidates.append((0, full_path))
+        try:
+            # Check direct children folders (Roblox versions are typically direct subdirectories)
+            for entry in os.scandir(versions_dir):
+                if entry.is_dir():
+                    candidate_file = os.path.join(entry.path, "StudioMCP.exe")
+                    if os.path.isfile(candidate_file):
+                        try:
+                            mtime = os.path.getmtime(candidate_file)
+                            candidates.append((mtime, candidate_file))
+                        except OSError:
+                            candidates.append((0, candidate_file))
+        except OSError:
+            pass
+
+        # If not found at top level of Versions, fall back to recursive walk
+        if not candidates:
+            for root, _, files in os.walk(versions_dir):
+                if "StudioMCP.exe" in files:
+                    full_path = os.path.join(root, "StudioMCP.exe")
+                    try:
+                        mtime = os.path.getmtime(full_path)
+                        candidates.append((mtime, full_path))
+                    except OSError:
+                        candidates.append((0, full_path))
 
     if candidates:
         candidates.sort(key=lambda x: x[0], reverse=True)
@@ -55,6 +85,7 @@ class StudioMCPBridge:
         self.proc = proc
         self.active_studio_set = False
         self.init_res = None
+        self._message_buffer = []
 
     def start_process(self):
         if not self.studio_mcp_path:
@@ -76,22 +107,37 @@ class StudioMCPBridge:
 
     def send_to_proc(self, msg):
         if not self.proc or not self.proc.stdin or self.proc.poll() is not None:
+            log_debug("Failed to send message: subprocess not running or stdin closed.")
             return False
         payload = json.dumps(msg) + "\n"
         try:
             self.proc.stdin.write(payload)
             self.proc.stdin.flush()
+            log_debug(f"Sent to StudioMCP: {payload.strip()}")
             return True
-        except (BrokenPipeError, OSError, ValueError):
+        except (BrokenPipeError, OSError, ValueError) as e:
+            log_debug(f"Exception sending to StudioMCP: {e}")
             return False
 
-    def read_from_proc(self):
+    def read_from_proc(self, target_id=None):
+        """
+        Reads next JSON line from subprocess. If target_id is specified,
+        returns the matching response and buffers non-matching or notification messages.
+        """
+        if target_id is not None:
+            for idx, buffered in enumerate(self._message_buffer):
+                if isinstance(buffered, dict) and buffered.get("id") == target_id:
+                    del self._message_buffer[idx]
+                    log_debug(f"Retrieved target_id {target_id} from buffer")
+                    return buffered
+
         if not self.proc or not self.proc.stdout or self.proc.poll() is not None:
             return None
         while True:
             try:
                 line = self.proc.stdout.readline()
-            except (OSError, ValueError):
+            except (OSError, ValueError) as e:
+                log_debug(f"Exception reading from StudioMCP stdout: {e}")
                 return None
             if not line:
                 return None
@@ -99,7 +145,15 @@ class StudioMCPBridge:
             if not line_str:
                 continue
             try:
-                return json.loads(line_str)
+                parsed = json.loads(line_str)
+                log_debug(f"Received from StudioMCP: {line_str}")
+                if target_id is not None:
+                    if isinstance(parsed, dict) and parsed.get("id") == target_id:
+                        return parsed
+                    else:
+                        self._message_buffer.append(parsed)
+                        continue
+                return parsed
             except Exception:
                 pass
 
@@ -129,7 +183,7 @@ class StudioMCPBridge:
                 "params": {"name": name, "arguments": args}
             }):
                 return None
-            res = self.read_from_proc()
+            res = self.read_from_proc(target_id=req_id)
             if res and isinstance(res, dict) and res.get("id") == req_id:
                 if "result" in res:
                     content = res["result"].get("content", [])
@@ -138,6 +192,9 @@ class StudioMCPBridge:
                         err_text = content[0].get("text", "")
                         if "Not connected" in err_text or "No active studio" in err_text:
                             self.active_studio_set = False
+                            log_debug(f"call_proc_tool received disconnected error on {name}, resetting active studio")
+                            if name not in ["list_roblox_studios", "set_active_studio"]:
+                                self.ensure_active_studio()
                             time.sleep(0.3)
                             continue
                 return res
@@ -148,6 +205,7 @@ class StudioMCPBridge:
         if self.active_studio_set:
             return True
         try:
+            log_debug("Querying active Roblox Studio sessions...")
             res = self.call_proc_tool("list_roblox_studios", {}, "list")
             if res and "result" in res:
                 content = res["result"].get("content", [])
@@ -158,12 +216,14 @@ class StudioMCPBridge:
                     if studios and isinstance(studios, list) and len(studios) > 0:
                         sid = studios[0].get("id")
                         if sid:
+                            log_debug(f"Binding active studio session to id: {sid}")
                             set_res = self.call_proc_tool("set_active_studio", {"studio_id": sid}, "set")
                             if set_res and not set_res.get("result", {}).get("isError", False):
                                 self.active_studio_set = True
+                                log_debug("Successfully bound active studio session")
                                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug(f"Exception while ensuring active studio: {e}")
         return False
 
     def handle_message(self, req):
@@ -203,7 +263,7 @@ class StudioMCPBridge:
                 "method": "tools/list",
                 "params": {}
             }):
-                list_res = self.read_from_proc()
+                list_res = self.read_from_proc(target_id="list_discover")
                 tools_list = list_res.get("result", {}).get("tools", []) if (list_res and isinstance(list_res, dict)) else []
                 return {
                     "jsonrpc": "2.0",
@@ -226,7 +286,7 @@ class StudioMCPBridge:
                     "id": req_id,
                     "error": {"code": -32603, "message": "Failed to query StudioMCP process"}
                 }
-            resp = self.read_from_proc()
+            resp = self.read_from_proc(target_id=req_id)
             if resp is None:
                 return {
                     "jsonrpc": "2.0",
@@ -248,7 +308,7 @@ class StudioMCPBridge:
                     "id": req_id,
                     "error": {"code": -32603, "message": "Failed to send tool call to StudioMCP process"}
                 }
-            resp = self.read_from_proc()
+            resp = self.read_from_proc(target_id=req_id)
             if resp is None:
                 return {
                     "jsonrpc": "2.0",
@@ -275,7 +335,7 @@ class StudioMCPBridge:
                     "id": req_id,
                     "error": {"code": -32603, "message": f"Failed to send {method} to StudioMCP process"}
                 }
-            resp = self.read_from_proc()
+            resp = self.read_from_proc(target_id=req_id)
             if resp is None:
                 return {
                     "jsonrpc": "2.0",
@@ -309,14 +369,26 @@ class StudioMCPBridge:
                     sys.stdout.flush()
                     continue
 
-                resp = self.handle_message(req)
-                if resp is not None:
-                    sys.stdout.write(json.dumps(resp) + "\n")
-                    sys.stdout.flush()
+                if isinstance(req, list):
+                    # Handle JSON-RPC batch requests
+                    batch_resps = []
+                    for item in req:
+                        res = self.handle_message(item)
+                        if res is not None:
+                            batch_resps.append(res)
+                    if batch_resps:
+                        sys.stdout.write(json.dumps(batch_resps) + "\n")
+                        sys.stdout.flush()
+                else:
+                    resp = self.handle_message(req)
+                    if resp is not None:
+                        sys.stdout.write(json.dumps(resp) + "\n")
+                        sys.stdout.flush()
 
             except (KeyboardInterrupt, SystemExit):
                 break
-            except Exception:
+            except Exception as e:
+                log_debug(f"Exception in main bridge loop: {e}")
                 pass
 
     def close(self):
