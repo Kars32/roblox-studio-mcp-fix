@@ -52,9 +52,18 @@ Roblox's generated `%LOCALAPPDATA%\Roblox\mcp.bat` places the `else` keyword on 
 ## Requirements
 
 * Windows 10 or 11
-* Python 3.8+ on PATH
+* Python 3.8+ on PATH (or Windows Python launcher `py`)
 * Roblox Studio with **Beta Features $\rightarrow$ Model Context Protocol** enabled
 * An open Place/Project loaded in Roblox Studio
+
+---
+
+## Configuration & Environment Variables
+
+| Variable | Description |
+|---|---|
+| `STUDIO_MCP_PATH` | Explicit path to `StudioMCP.exe` (overrides automatic version directory scanning). |
+| `STUDIO_MCP_DEBUG` | Set to `1`, `true`, or `yes` to output diagnostic bridge logs to `stderr`. |
 
 ---
 
@@ -66,17 +75,22 @@ If you prefer to install manually:
 2. Replace `%LOCALAPPDATA%\Roblox\mcp.bat` with:
    ```bat
    @echo off
-   python "%LOCALAPPDATA%\Roblox\studio_mcp_bridge.py" %*
+   where python >nul 2>nul
+   if %ERRORLEVEL% equ 0 (
+       python "%LOCALAPPDATA%\Roblox\studio_mcp_bridge.py" %*
+   ) else (
+       py -3 "%LOCALAPPDATA%\Roblox\studio_mcp_bridge.py" %*
+   )
    ```
 3. Add the server to your client's MCP configuration (`mcp_config.json`):
    ```json
    {
-     \"mcpServers\": {
-       \"Roblox_Studio\": {
-         \"command\": \"cmd.exe\",
-         \"args\": [
-           \"/c\",
-           \"cd /d %LOCALAPPDATA%\\\\Roblox && .\\\\mcp.bat\"
+     "mcpServers": {
+       "Roblox_Studio": {
+         "command": "cmd.exe",
+         "args": [
+           "/c",
+           "cd /d %LOCALAPPDATA%\\Roblox && .\\mcp.bat"
          ]
        }
      }
